@@ -1,2 +1,5 @@
-# football-news-fact-check
-football news fact check
+requests
+pandas
+streamlit
+fpdf
+python-dotenv   # optional, for local environment variables
