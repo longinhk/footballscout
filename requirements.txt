@@ -2,4 +2,6 @@ requests
 pandas
 streamlit
 fpdf
-python-dotenv   # optional, for local environment variables
+scikit-learn
+joblib
+python-dotenv
