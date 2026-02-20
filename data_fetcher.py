@@ -1,6 +1,8 @@
 import requests
 import pandas as pd
 import streamlit as st
+import time
+import requests
 
 # Use Streamlit secrets in production, or python-dotenv for local dev
 def get_api_key():
@@ -61,3 +63,14 @@ def fetch_player_stats(player_id, season="2024"):
     except (KeyError, IndexError, TypeError) as e:
         st.error(f"Error parsing player data: {e}")
         return None
+
+def fetch_data(url):
+    for i in range(3): 
+        try:
+            response = requests.get(url, timeout=10)
+            response.raise_for_status()
+            return response
+        except requests.exceptions.RequestException as e:
+            print(f"Error: {e}, retrying in {2**i} seconds...")
+            time.sleep(2**i)
+    return None
