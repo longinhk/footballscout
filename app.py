@@ -74,8 +74,8 @@ if compare_btn:
                 st.write(f"✅ {p2['name']} (€{m2}M vs €{m1}M)")
 
         # PDF download (optional – you can extend to include both values)
-        pdf_path = generate_valuation_pdf(p1, p2, [val1, val2] if method!="Both" else [h1, h2])
-        with open(pdf_path, "rb") as f:
-            st.download_button("📄 Download PDF Report", f, "valuation_report.pdf")
+        # PDF download (optional – you can extend to include both values)
+        pdf_bytes = generate_valuation_pdf(p1, p2, [val1, val2] if method!="Both" else [h1, h2])
+        st.download_button("📄 Download PDF Report", pdf_bytes, "valuation_report.pdf")
     else:
         st.error("Could not retrieve data for one or both players.")
