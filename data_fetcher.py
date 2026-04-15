@@ -2,7 +2,6 @@ import requests
 import pandas as pd
 import streamlit as st
 import time
-import requests
 
 # Use Streamlit secrets in production, or python-dotenv for local dev
 def get_api_key():
@@ -16,27 +15,30 @@ def get_api_key():
 def fetch_player_stats(player_id, season="2024"):
     """
     Fetch player statistics from API-Football.
-    Returns a dictionary with name, age, games, goals, assists, contract_years.
+    Returns a dictionary with name, age, games, goals, assists, contract_years,
+    position, tackles, clean_sheets, saves, conceded, and interceptions.
     """
     url = "https://v3.football.api-sports.io"
     querystring = {"id": str(player_id), "season": str(season)}
-    
-   try:
-    api_key = st.secrets["RAPIDAPI_KEY"]
-    except:
-    st.error("please set Streamlit Secrets  RAPIDAPI_KEY！")
-    return None
 
-headers = {
-    "x-apisports-key": api_key
-}
-try:                          
-    response = requests.get(url, headers=headers, params=querystring, timeout=10)
-    response.raise_for_status()
-    data = response.json()
-except requests.exceptions.RequestException as e:
-    st.error(f"API request failed: {e}")
-    return None
+    try:
+        api_key = st.secrets["RAPIDAPI_KEY"]
+    except:
+        st.error("please set Streamlit Secrets  RAPIDAPI_KEY！")
+        return None
+
+    headers = {
+        "x-apisports-key": api_key
+    }
+
+    try:
+        response = requests.get(url, headers=headers, params=querystring, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+    except requests.exceptions.RequestException as e:
+        st.error(f"API request failed: {e}")
+        return None
+
     # Parse the response
     if not data.get("response"):
         st.warning("No data found for this player ID. Please check the ID.")
@@ -51,6 +53,12 @@ except requests.exceptions.RequestException as e:
         goals = stats['goals'].get('total', 0) or 0
         assists = stats['goals'].get('assists', 0) or 0
         age = player_info.get('age', 0)
+        position = stats['games'].get('position', 'Unknown')
+        tackles = stats.get('tackles', {}).get('total', 0) or 0
+        clean_sheets = stats.get('games', {}).get('cleansheets', 0) or 0
+        saves = stats.get('goals', {}).get('saves', 0) or 0
+        conceded = stats.get('goals', {}).get('conceded', 0) or 0
+        interceptions = stats.get('tackles', {}).get('interceptions', 0) or 0
 
         # Contract years – not provided by this API, so we use a placeholder.
         # You could enhance this by calling another endpoint or allowing manual input.
@@ -62,7 +70,13 @@ except requests.exceptions.RequestException as e:
             'games': games,
             'goals': goals,
             'assists': assists,
-            'contract_years': contract_years
+            'contract_years': contract_years,
+            'position': position,
+            'tackles': tackles,
+            'clean_sheets': clean_sheets,
+            'saves': saves,
+            'conceded': conceded,
+            'interceptions': interceptions
         }
     except (KeyError, IndexError, TypeError) as e:
         st.error(f"Error parsing player data: {e}")
