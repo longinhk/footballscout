@@ -18,7 +18,7 @@ def fetch_player_stats(player_id, season="2024"):
     Returns a dictionary with name, age, games, goals, assists, contract_years,
     position, tackles, clean_sheets, saves, conceded, and interceptions.
     """
-    url = "https://v3.football.api-sports.io"
+    url = "https://v3.football.api-sports.io/players"
     querystring = {"id": str(player_id), "season": str(season)}
 
     try:
