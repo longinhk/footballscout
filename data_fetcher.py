@@ -21,22 +21,22 @@ def fetch_player_stats(player_id, season="2024"):
     url = "https://v3.football.api-sports.io"
     querystring = {"id": str(player_id), "season": str(season)}
     
-    try:
-        api_key = st.secrets["RAPIDAPI_KEY"]
+   try:
+    api_key = st.secrets["RAPIDAPI_KEY"]
     except:
-        st.error("please set Streamlit Secrets  RAPIDAPI_KEY！")
-        return None
+    st.error("please set Streamlit Secrets  RAPIDAPI_KEY！")
+    return None
 
-    headers = {
-        "x-apisports-key": api_key
-    }
-        response = requests.get(url, headers=headers, params=querystring, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-    except requests.exceptions.RequestException as e:
-        st.error(f"API request failed: {e}")
-        return None
-
+headers = {
+    "x-apisports-key": api_key
+}
+try:                          
+    response = requests.get(url, headers=headers, params=querystring, timeout=10)
+    response.raise_for_status()
+    data = response.json()
+except requests.exceptions.RequestException as e:
+    st.error(f"API request failed: {e}")
+    return None
     # Parse the response
     if not data.get("response"):
         st.warning("No data found for this player ID. Please check the ID.")
