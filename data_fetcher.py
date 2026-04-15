@@ -18,14 +18,18 @@ def fetch_player_stats(player_id, season="2024"):
     Fetch player statistics from API-Football.
     Returns a dictionary with name, age, games, goals, assists, contract_years.
     """
-    url = "https://api-football-v1.p.rapidapi.com/v3/players"
-    querystring = {"id": player_id, "season": season}
-    headers = {
-        "X-RapidAPI-Key": get_api_key(),
-        "X-RapidAPI-Host": "api-football-v1.p.rapidapi.com"
-    }
-
+    url = "https://api-sports.io"
+    querystring = {"id": str(player_id), "season": str(season)}
+    
     try:
+        api_key = st.secrets["RAPIDAPI_KEY"]
+    except:
+        st.error(please set Streamlit Secrets  RAPIDAPI_KEY！")
+        return None
+
+    headers = {
+        "x-apisports-key": api_key
+    }
         response = requests.get(url, headers=headers, params=querystring, timeout=10)
         response.raise_for_status()
         data = response.json()
