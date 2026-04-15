@@ -24,7 +24,7 @@ def fetch_player_stats(player_id, season="2024"):
     try:
         api_key = st.secrets["RAPIDAPI_KEY"]
     except:
-        st.error(please set Streamlit Secrets  RAPIDAPI_KEY！")
+        st.error("please set Streamlit Secrets  RAPIDAPI_KEY！")
         return None
 
     headers = {
