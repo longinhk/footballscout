@@ -1,94 +1,165 @@
+"""API-Football client with a stable, testable domain model."""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
 import requests
-import pandas as pd
-import streamlit as st
-import time
 
-# Use Streamlit secrets in production, or python-dotenv for local dev
-def get_api_key():
+BASE_URL = "https://v3.football.api-sports.io"
+
+
+class FootballAPIError(RuntimeError):
+    """An actionable API error safe to show in the UI."""
+
+
+@dataclass(frozen=True)
+class PlayerOption:
+    id: int
+    name: str
+    age: int | None = None
+    nationality: str = ""
+    photo: str = ""
+
+    @property
+    def label(self) -> str:
+        details = " · ".join(filter(None, [self.nationality, f"age {self.age}" if self.age else ""]))
+        return f"{self.name} ({self.id})" + (f" — {details}" if details else "")
+
+
+def get_secret(name: str) -> str | None:
+    """Read environment first, then Streamlit secrets without noisy missing-file errors."""
+    if value := os.getenv(name):
+        return value
+    locations = (Path.cwd() / ".streamlit/secrets.toml", Path.home() / ".streamlit/secrets.toml")
+    if not any(path.is_file() for path in locations):
+        return None
     try:
-        return st.secrets["RAPIDAPI_KEY"]
-    except:
-        # use your own key
-        import os
-        return os.getenv("RAPIDAPI_KEY", "YOUR_RAPIDAPI_KEY")
+        import streamlit as st
 
-def fetch_player_stats(player_id, season="2024"):
-    """
-    Fetch player statistics from API-Football.
-    Returns a dictionary with name, age, games, goals, assists, contract_years,
-    position, tackles, clean_sheets, saves, conceded, and interceptions.
-    """
-    url = "https://v3.football.api-sports.io/players"
-    querystring = {"id": str(player_id), "season": str(season)}
-
-    try:
-        api_key = st.secrets["RAPIDAPI_KEY"]
-    except:
-        st.error("please set Streamlit Secrets  RAPIDAPI_KEY！")
+        value = st.secrets.get(name)
+        return str(value) if value else None
+    except (FileNotFoundError, KeyError):
         return None
 
-    headers = {
-        "x-apisports-key": api_key
-    }
 
-    try:
-        response = requests.get(url, headers=headers, params=querystring, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-    except requests.exceptions.RequestException as e:
-        st.error(f"API request failed: {e}")
-        return None
+class FootballClient:
+    def __init__(self, api_key: str, timeout: int = 15, session: requests.Session | None = None):
+        if not api_key.strip():
+            raise ValueError("An API-Sports key is required.")
+        self.api_key = api_key.strip()
+        self.timeout = timeout
+        self.session = session or requests.Session()
 
-    # Parse the response
-    if not data.get("response"):
-        st.warning("No data found for this player ID. Please check the ID.")
-        return None
-
-    try:
-        player_info = data['response'][0]['player']
-        stats = data['response'][0]['statistics'][0]
-
-        # Basic stats
-        games = stats['games'].get('appearences', 0) or 0
-        goals = stats['goals'].get('total', 0) or 0
-        assists = stats['goals'].get('assists', 0) or 0
-        age = player_info.get('age', 0)
-        position = stats['games'].get('position', 'Unknown')
-        tackles = stats.get('tackles', {}).get('total', 0) or 0
-        clean_sheets = stats.get('games', {}).get('cleansheets', 0) or 0
-        saves = stats.get('goals', {}).get('saves', 0) or 0
-        conceded = stats.get('goals', {}).get('conceded', 0) or 0
-        interceptions = stats.get('tackles', {}).get('interceptions', 0) or 0
-
-        # Contract years – not provided by this API, so we use a placeholder.
-        # You could enhance this by calling another endpoint or allowing manual input.
-        contract_years = 3  # default assumption
-
-        return {
-            'name': player_info.get('name', 'Unknown'),
-            'age': age,
-            'games': games,
-            'goals': goals,
-            'assists': assists,
-            'contract_years': contract_years,
-            'position': position,
-            'tackles': tackles,
-            'clean_sheets': clean_sheets,
-            'saves': saves,
-            'conceded': conceded,
-            'interceptions': interceptions
-        }
-    except (KeyError, IndexError, TypeError) as e:
-        st.error(f"Error parsing player data: {e}")
-        return None
-
-def fetch_data(url):
-    for i in range(3): 
+    def _get(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
         try:
-            response = requests.get(url, timeout=10)
+            response = self.session.get(
+                f"{BASE_URL}{path}",
+                headers={"x-apisports-key": self.api_key},
+                params=params,
+                timeout=self.timeout,
+            )
             response.raise_for_status()
-            return response
-        except requests.exceptions.RequestException as e:
-            print(f"Error: {e}, retrying in {2**i} seconds...")
-            time.sleep(2**i)
-    return None
+            payload = response.json()
+        except requests.Timeout as exc:
+            raise FootballAPIError("API-Football timed out. Please retry.") from exc
+        except requests.HTTPError as exc:
+            status = exc.response.status_code if exc.response is not None else "unknown"
+            hints = {
+                401: "Check that the API key is correct.",
+                403: "This key is not authorized. Use a direct API-Sports Football key.",
+                429: "The daily API quota or rate limit has been reached.",
+            }
+            raise FootballAPIError(hints.get(status, f"API-Football returned HTTP {status}.")) from exc
+        except (requests.RequestException, ValueError) as exc:
+            raise FootballAPIError(f"Could not read API-Football: {exc}") from exc
+
+        errors = payload.get("errors")
+        if errors:
+            raise FootballAPIError(f"API-Football rejected the request: {errors}")
+        return payload
+
+    def search_players(self, query: str) -> list[PlayerOption]:
+        query = query.strip()
+        if len(query) < 3:
+            raise FootballAPIError("Enter at least three characters to search.")
+        payload = self._get("/players/profiles", {"search": query})
+        options: list[PlayerOption] = []
+        for item in payload.get("response") or []:
+            player = item.get("player", item)
+            if player.get("id") and player.get("name"):
+                options.append(
+                    PlayerOption(
+                        id=int(player["id"]),
+                        name=str(player["name"]),
+                        age=_optional_int(player.get("age")),
+                        nationality=str(player.get("nationality") or ""),
+                        photo=str(player.get("photo") or ""),
+                    )
+                )
+        return options
+
+    def player_stats(self, player_id: int, season: int) -> dict[str, Any]:
+        payload = self._get("/players", {"id": int(player_id), "season": int(season)})
+        return parse_player_stats(payload)
+
+
+def _optional_int(value: Any) -> int | None:
+    return int(value) if value not in (None, "") else None
+
+
+def _number(value: Any) -> int:
+    return int(value or 0)
+
+
+def parse_player_stats(payload: dict[str, Any]) -> dict[str, Any]:
+    """Normalize API data and aggregate a player's clubs for the selected season."""
+    responses = payload.get("response") or []
+    if not responses:
+        raise FootballAPIError("No statistics were found for that player and season.")
+    try:
+        player = responses[0]["player"]
+        entries = responses[0]["statistics"]
+    except (KeyError, TypeError) as exc:
+        raise FootballAPIError("API-Football returned an unexpected data shape.") from exc
+    if not entries:
+        raise FootballAPIError("The player exists, but has no statistics for that season.")
+
+    def total(group: str, key: str) -> int:
+        return sum(_number((entry.get(group) or {}).get(key)) for entry in entries)
+
+    primary = max(entries, key=lambda entry: _number((entry.get("games") or {}).get("minutes")))
+    games = primary.get("games") or {}
+    ratings = [
+        float((entry.get("games") or {}).get("rating"))
+        for entry in entries
+        if (entry.get("games") or {}).get("rating")
+    ]
+    return {
+        "id": int(player["id"]),
+        "name": str(player.get("name") or "Unknown"),
+        "photo": str(player.get("photo") or ""),
+        "age": _number(player.get("age")),
+        "nationality": str(player.get("nationality") or "Unknown"),
+        "team": str((primary.get("team") or {}).get("name") or "Unknown"),
+        "league": str((primary.get("league") or {}).get("name") or "Unknown"),
+        "position": str(games.get("position") or "Unknown"),
+        "appearances": total("games", "appearences"),
+        "minutes": total("games", "minutes"),
+        "rating": round(sum(ratings) / len(ratings), 2) if ratings else 0.0,
+        "goals": total("goals", "total"),
+        "assists": total("goals", "assists"),
+        "shots": total("shots", "total"),
+        "passes": total("passes", "total"),
+        "key_passes": total("passes", "key"),
+        "tackles": total("tackles", "total"),
+        "interceptions": total("tackles", "interceptions"),
+        "duels_won": total("duels", "won"),
+        "dribbles": total("dribbles", "success"),
+        "clean_sheets": total("games", "cleansheets"),
+        "saves": total("goals", "saves"),
+        "conceded": total("goals", "conceded"),
+    }

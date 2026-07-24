@@ -1,127 +1,180 @@
+"""Reproducible transfer-value regression baseline.
+
+The bundled model is demonstrative: real production credibility requires licensed,
+historical transfer-fee labels. The API statistics alone do not provide them.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from functools import lru_cache
+
+import numpy as np
 import pandas as pd
-from sklearn.linear_model import LinearRegression
-from sklearn.model_selection import train_test_split
-import joblib  # for saving/loading model
-import os
+from sklearn.compose import ColumnTransformer
+from sklearn.impute import SimpleImputer
+from sklearn.linear_model import Ridge
+from sklearn.metrics import mean_absolute_error, r2_score
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
-# ---------- Position‑Based Heuristic Formulas ----------
-def calculate_value_heuristic(stats):
-    """
-    stats: dict from data_fetcher
-    Returns estimated value in million euros.
-    """
-    position = stats.get('position', 'Unknown').lower()
-    age = stats.get('age', 1)
-    contract = stats.get('contract_years', 1)
+NUMERIC_FEATURES = [
+    "age",
+    "appearances",
+    "minutes",
+    "rating",
+    "goals",
+    "assists",
+    "key_passes",
+    "tackles",
+    "interceptions",
+    "duels_won",
+    "dribbles",
+    "clean_sheets",
+    "saves",
+    "conceded",
+]
+CATEGORICAL_FEATURES = ["position"]
 
-    # Base value multiplier
-    base = 10
 
-    if 'goalkeeper' in position:
-        # Use saves, clean sheets, conceded
-        saves = stats.get('saves', 0)
-        clean = stats.get('clean_sheets', 0)
-        conceded = stats.get('conceded', 1) or 1  # avoid division by zero
-        performance = (saves * 0.4 + clean * 0.6) / conceded
-    elif 'defender' in position:
-        tackles = stats.get('tackles', 0)
-        interceptions = stats.get('interceptions', 0)
-        clean = stats.get('clean_sheets', 0)
-        performance = (tackles * 0.3 + interceptions * 0.3 + clean * 0.4)
-    elif 'midfielder' in position:
-        goals = stats.get('goals', 0)
-        assists = stats.get('assists', 0)
-        tackles = stats.get('tackles', 0)
-        performance = (goals * 0.4 + assists * 0.4 + tackles * 0.2)
-    else:  # attacker / forward
-        goals = stats.get('goals', 0)
-        assists = stats.get('assists', 0)
-        performance = (goals * 0.6 + assists * 0.4)
+@dataclass(frozen=True)
+class ValuationResult:
+    value_millions: float
+    model_name: str
+    caveat: str
 
-    value = (performance / age) * contract * base
-    return round(value, 2)
 
-# ---------- Machine Learning Model (Trained on Historical Data) ----------
-MODEL_FILE = "transfer_model.pkl"
-
-def train_model(csv_path="transfer_data.csv"):
-    """
-    Train a linear regression model on historical transfer data.
-    Expected CSV columns: age, goals, assists, tackles, clean_sheets, saves, conceded, position_encoded, transfer_fee
-    (position_encoded: 0=GK,1=DEF,2=MID,3=FWD)
-    """
-    if not os.path.exists(csv_path):
-        # Create a dummy dataset if none exists (for demonstration)
-        data = {
-            'age': [25, 28, 22, 30, 26],
-            'goals': [20, 5, 15, 2, 10],
-            'assists': [10, 8, 12, 1, 5],
-            'tackles': [5, 30, 15, 40, 10],
-            'clean_sheets': [0, 10, 0, 15, 0],
-            'saves': [0, 0, 0, 0, 50],
-            'conceded': [30, 20, 25, 15, 10],
-            'position_encoded': [3, 1, 2, 0, 0],  # FWD, DEF, MID, GK, GK
-            'transfer_fee': [80, 40, 60, 25, 30]  # million €
+def _demo_dataset(seed: int = 42, rows: int = 500) -> pd.DataFrame:
+    """Create deterministic plausible data for a software-demo baseline only."""
+    rng = np.random.default_rng(seed)
+    position = rng.choice(["Goalkeeper", "Defender", "Midfielder", "Attacker"], rows)
+    age = rng.integers(18, 36, rows)
+    appearances = rng.integers(5, 39, rows)
+    minutes = appearances * rng.integers(55, 91, rows)
+    rating = np.clip(rng.normal(6.8, 0.55, rows), 5.0, 8.8)
+    attack = (position == "Attacker").astype(int)
+    midfield = (position == "Midfielder").astype(int)
+    defender = (position == "Defender").astype(int)
+    keeper = (position == "Goalkeeper").astype(int)
+    goals = rng.poisson(0.18 * appearances * (1 + 1.8 * attack + 0.7 * midfield))
+    assists = rng.poisson(0.12 * appearances * (1 + attack + midfield))
+    key_passes = rng.poisson(0.7 * appearances * (1 + midfield))
+    tackles = rng.poisson(1.2 * appearances * (1 + defender + 0.5 * midfield))
+    interceptions = rng.poisson(0.7 * appearances * (1 + defender))
+    duels_won = rng.poisson(2.5 * appearances)
+    dribbles = rng.poisson(0.7 * appearances * (1 + attack + midfield))
+    clean_sheets = rng.binomial(appearances, 0.25) * (defender + keeper)
+    saves = rng.poisson(2.6 * appearances) * keeper
+    conceded = rng.poisson(1.15 * appearances) * keeper
+    potential = np.maximum(0, 30 - age) * 1.8
+    fee = (
+        1.5
+        + potential
+        + goals * 1.25
+        + assists * 0.9
+        + rating * 3.2
+        + appearances * 0.25
+        + clean_sheets * 0.45
+        + rng.normal(0, 5, rows)
+    )
+    return pd.DataFrame(
+        {
+            "age": age,
+            "appearances": appearances,
+            "minutes": minutes,
+            "rating": rating,
+            "goals": goals,
+            "assists": assists,
+            "key_passes": key_passes,
+            "tackles": tackles,
+            "interceptions": interceptions,
+            "duels_won": duels_won,
+            "dribbles": dribbles,
+            "clean_sheets": clean_sheets,
+            "saves": saves,
+            "conceded": conceded,
+            "position": position,
+            "market_value_millions": np.maximum(fee, 0.5),
         }
-        df = pd.DataFrame(data)
-        df.to_csv(csv_path, index=False)
-    else:
-        df = pd.read_csv(csv_path)
+    )
 
-    # Features and target
-    features = ['age', 'goals', 'assists', 'tackles', 'clean_sheets', 'saves', 'conceded', 'position_encoded']
-    X = df[features]
-    y = df['transfer_fee']
 
-    # Train
-    model = LinearRegression()
-    model.fit(X, y)
+def build_pipeline() -> Pipeline:
+    numeric = Pipeline(
+        [("imputer", SimpleImputer(strategy="median")), ("scale", StandardScaler())]
+    )
+    categories = Pipeline(
+        [
+            ("imputer", SimpleImputer(strategy="most_frequent")),
+            ("encode", OneHotEncoder(handle_unknown="ignore")),
+        ]
+    )
+    return Pipeline(
+        [
+            (
+                "features",
+                ColumnTransformer(
+                    [
+                        ("numeric", numeric, NUMERIC_FEATURES),
+                        ("categories", categories, CATEGORICAL_FEATURES),
+                    ]
+                ),
+            ),
+            ("model", Ridge(alpha=8.0)),
+        ]
+    )
 
-    # Save model
-    joblib.dump(model, MODEL_FILE)
-    return model
 
-def load_model():
-    """Load trained model or train if not exists."""
-    if os.path.exists(MODEL_FILE):
-        return joblib.load(MODEL_FILE)
-    else:
-        return train_model()
+@lru_cache(maxsize=1)
+def demo_model() -> Pipeline:
+    data = _demo_dataset()
+    return build_pipeline().fit(
+        data[NUMERIC_FEATURES + CATEGORICAL_FEATURES],
+        data["market_value_millions"],
+    )
 
-def predict_value_ml(stats):
-    """
-    Use trained ML model to predict transfer value.
-    stats: dict from data_fetcher
-    """
-    model = load_model()
 
-    # Encode position
-    pos = stats.get('position', '').lower()
-    if 'goalkeeper' in pos:
-        pos_enc = 0
-    elif 'defender' in pos:
-        pos_enc = 1
-    elif 'midfielder' in pos:
-        pos_enc = 2
-    else:
-        pos_enc = 3
+def evaluate_demo_model() -> dict[str, float]:
+    data = _demo_dataset()
+    train = data.sample(frac=0.8, random_state=42)
+    test = data.drop(train.index)
+    model = build_pipeline().fit(
+        train[NUMERIC_FEATURES + CATEGORICAL_FEATURES],
+        train["market_value_millions"],
+    )
+    predicted = model.predict(test[NUMERIC_FEATURES + CATEGORICAL_FEATURES])
+    return {
+        "mae_millions": round(float(mean_absolute_error(test["market_value_millions"], predicted)), 2),
+        "r2": round(float(r2_score(test["market_value_millions"], predicted)), 3),
+        "test_rows": len(test),
+    }
 
-    # Prepare feature vector (order must match training)
-    features = [[
-        stats.get('age', 25),
-        stats.get('goals', 0),
-        stats.get('assists', 0),
-        stats.get('tackles', 0),
-        stats.get('clean_sheets', 0),
-        stats.get('saves', 0),
-        stats.get('conceded', 1),
-        pos_enc
-    ]]
 
-    pred = model.predict(features)[0]
-    return round(pred, 2)
+def predict_value(player: dict) -> ValuationResult:
+    row = {feature: player.get(feature, 0) for feature in NUMERIC_FEATURES}
+    row["position"] = player.get("position", "Unknown")
+    prediction = max(0.5, float(demo_model().predict(pd.DataFrame([row]))[0]))
+    return ValuationResult(
+        value_millions=round(prediction, 2),
+        model_name="Ridge regression baseline",
+        caveat="Trained on synthetic demonstration data; not an official market valuation.",
+    )
 
-def compare_methods(stats):
-    heuristic = calculate_value_heuristic(stats)
-    ml = predict_value_ml(stats)
-    return {'heuristic': heuristic, 'ml': ml}
+
+def feature_comparison(first: dict, second: dict) -> list[dict]:
+    """Return normalized evidence used by both charts and explanations."""
+    metrics = ["rating", "goals", "assists", "key_passes", "tackles", "interceptions", "duels_won"]
+    result = []
+    for metric in metrics:
+        a, b = float(first.get(metric, 0)), float(second.get(metric, 0))
+        maximum = max(a, b, 1.0)
+        result.append(
+            {
+                "metric": metric.replace("_", " ").title(),
+                "first": a,
+                "second": b,
+                "first_normalized": round(a / maximum * 100, 1),
+                "second_normalized": round(b / maximum * 100, 1),
+            }
+        )
+    return result
