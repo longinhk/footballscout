@@ -1,7 +1,9 @@
+.DS_Store
+.streamlit/secrets.toml
 __pycache__/
 *.py[cod]
-.DS_Store
 .pytest_cache/
-.streamlit/secrets.toml
+.mypy_cache/
+.ruff_cache/
 .venv/
 models/*.joblib

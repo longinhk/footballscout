@@ -1,108 +1,68 @@
-# FootballScout
+# Footy-Scout
 
-FootballScout is a portfolio-grade Streamlit application for finding and comparing
-football players using live API-Football data. It combines interactive performance
-visualization, a reproducible regression baseline, grounded explanations, and PDF
-reporting.
+Footy-Scout is a Streamlit workspace for comparing two football players across
+season output, per-90 performance and transparent valuation demos.
 
-> The included model is a software-engineering demonstration trained on synthetic
-> data. Its output is not an official transfer-market valuation. A credible market
-> model requires licensed historical valuation or transfer-fee labels.
+The app opens with fictional demo players, so the complete comparison and
+export flow works without an account or API key. Live comparisons use
+[API-Football](https://www.api-football.com/).
 
-## Highlights
+## What it includes
 
-- Player search by name with disambiguated API-Football results
-- Direct API-Sports authentication and actionable HTTP errors
-- One-hour search cache and 15-minute statistics cache
-- Side-by-side profiles and an interactive Plotly radar chart
-- Scikit-learn preprocessing and Ridge regression pipeline
-- Reproducible holdout MAE and R² metrics
-- Evidence-based explanation with optional OpenAI Responses API enhancement
-- In-memory PDF reports
-- Unit tests and GitHub Actions CI
-- Streamlit Community Cloud-ready configuration
+- No-key demo mode with four fictional player profiles
+- Live API-Football comparisons with cached season responses
+- Combined statistics across every competition row returned for a player
+- Position-aware, per-90 heuristic and constrained demonstration model
+- Explicit equal-weight blended estimate and method spread
+- Side-by-side summary, shared performance table and tie handling
+- PDF and CSV exports with player-specific filenames
+- Actionable API errors and graceful PDF character fallback for unsupported glyphs
 
-## Architecture
+> The valuations are educational estimates. They do not include contract data,
+> injury history, club finances, league-strength adjustments or verified market
+> comparables, and they are not official market values or financial advice.
 
-```text
-app.py              Streamlit presentation and session workflow
-data_fetcher.py     API client, errors, search, and response normalization
-valuation.py        Features, regression pipeline, evaluation, inference
-explanations.py     Deterministic and optional LLM explanations
-pdf_report.py       In-memory PDF generation
-tests/              Offline unit tests
-.github/workflows/  Continuous integration
-```
+## Run locally
 
-The API and model modules do not render Streamlit UI. This separation keeps them
-testable and makes a future FastAPI or mobile frontend possible.
-
-## Local setup
+Python 3.10 or newer is recommended.
 
 ```bash
-git clone https://github.com/longinhk/footballscout.git
-cd footballscout
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
-cp .streamlit/secrets.example.toml .streamlit/secrets.toml
-```
-
-Edit `.streamlit/secrets.toml` and add the direct key from the API-Sports dashboard:
-
-```toml
-API_SPORTS_KEY = "your-key"
-```
-
-Run:
-
-```bash
 python -m streamlit run app.py
 ```
 
-## Tests
+Open <http://localhost:8501>. Demo mode is ready immediately.
+
+### Enable live data
+
+Create `.streamlit/secrets.toml` (already ignored by Git):
+
+```toml
+RAPIDAPI_KEY = "your-rapidapi-key"
+```
+
+You can alternatively set `RAPIDAPI_KEY` in the environment or enter a
+temporary override in the sidebar. A configured server-side key is never sent
+back to the password field. Player IDs must be API-Football IDs.
+
+For players returned with several team or competition entries, Footy-Scout sums
+counting statistics, uses an appearance-weighted rating, and labels the result
+as an all-competitions view.
+
+## Test
 
 ```bash
 python -m unittest discover -s tests -v
+python -m compileall -q .
 ```
 
-Tests use fixtures and make no paid API calls.
+## Project structure
 
-## Optional AI explanation
-
-The deterministic explanation is always available. To enable the LLM enhancement:
-
-```toml
-OPENAI_API_KEY = "your-key"
-OPENAI_MODEL = "gpt-5.6-luna"
-```
-
-The integration uses the Responses API and sends only the displayed structured
-statistics and model outputs. If the call fails, the app safely falls back to the
-deterministic explanation.
-
-## Deploy on Streamlit Community Cloud
-
-1. Push this repository to GitHub.
-2. In Streamlit Community Cloud, create an app from the repository.
-3. Set the entry point to `app.py`.
-4. Add `API_SPORTS_KEY` under **Advanced settings → Secrets**.
-5. Optionally add `OPENAI_API_KEY` and `OPENAI_MODEL`.
-6. Deploy, then verify search, comparison, cache behavior, and PDF download.
-
-Never commit `.streamlit/secrets.toml`; it is ignored by Git.
-
-## ML roadmap
-
-The next data-science milestone is replacing synthetic labels with a documented,
-licensed dataset containing point-in-time market values or completed transfer fees.
-Then:
-
-1. Split chronologically to avoid future-data leakage.
-2. Establish naive and linear baselines.
-3. Compare tree/boosting models using MAE and calibration by price band.
-4. Report performance by position, league, age, and season.
-5. Version data, features, model artifact, and evaluation report.
-
-This progression is more credible than presenting a complex model trained on a tiny
-or undocumented dataset.
+- `app.py` — Streamlit interface and comparison presentation
+- `data_fetcher.py` — API client and response normalization
+- `valuation.py` — bounded heuristic and demonstration model
+- `pdf_report.py` — in-memory PDF export
+- `demo_data.py` — fictional, deterministic demo profiles
+- `tests/test_core.py` — parser, model, API and export tests

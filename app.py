@@ -1,236 +1,350 @@
-"""FootballScout — player comparison and transparent ML valuation demo."""
+"""Footy-Scout Streamlit application."""
 
 from __future__ import annotations
 
+import re
+import unicodedata
 from datetime import date
+from typing import Any
 
 import pandas as pd
-import plotly.graph_objects as go
 import streamlit as st
 
-from data_fetcher import FootballAPIError, FootballClient, PlayerOption, get_secret
-from explanations import llm_explanation
+from data_fetcher import FootballAPIError, fetch_player_stats, get_api_key
+from demo_data import demo_player_names, get_demo_player
 from pdf_report import generate_valuation_pdf
-from valuation import ValuationResult, evaluate_demo_model, feature_comparison, predict_value
-
-st.set_page_config(page_title="FootballScout", page_icon="⚽", layout="wide")
-st.markdown(
-    """
-    <style>
-      .block-container {max-width: 1200px; padding-top: 1.8rem;}
-      .hero {padding: 1.4rem 1.6rem; border-radius: 18px;
-             background: linear-gradient(120deg,#081c15,#1b4332); color: white;}
-      .hero h1 {margin: 0; font-size: 2.4rem;}
-      .hero p {color: #b7e4c7; margin-bottom: 0;}
-      [data-testid="stMetric"] {background:#f8fafc; border:1px solid #e2e8f0;
-                               border-radius:12px; padding:12px;}
-    </style>
-    <div class="hero">
-      <h1>⚽ FootballScout</h1>
-      <p>Live performance comparison with transparent machine-learning estimates.</p>
-    </div>
-    """,
-    unsafe_allow_html=True,
+from ui_components import (
+    APP_CSS,
+    included_items,
+    insights_html,
+    masthead_html,
+    matchup_html,
+    overview_html,
+    performance_duel_html,
+    player_key_html,
+    section_header_html,
+    sidebar_brand_html,
+    sidebar_step_html,
+    valuation_lab_html,
 )
+from valuation import compare_methods, per_90
 
 
-@st.cache_data(ttl=3600, show_spinner=False, max_entries=100)
-def cached_search(query: str, api_key: str) -> list[PlayerOption]:
-    return FootballClient(api_key).search_players(query)
+st.set_page_config(
+    page_title="Footy-Scout",
+    page_icon="⚽",
+    layout="wide",
+    initial_sidebar_state="auto",
+)
+st.html(APP_CSS)
 
 
-@st.cache_data(ttl=900, show_spinner=False, max_entries=200)
-def cached_stats(player_id: int, season: int, api_key: str) -> dict:
-    return FootballClient(api_key).player_stats(player_id, season)
+@st.cache_data(ttl=900, show_spinner=False)
+def cached_player(player_id: int, season: str, _api_key: str) -> dict[str, Any]:
+    """Cache public season data without hashing or retaining the API secret."""
+    return fetch_player_stats(player_id, season, _api_key)
 
 
-def search_box(slot: int, api_key: str) -> PlayerOption | None:
-    query = st.text_input(
-        f"Player {slot}",
-        key=f"query_{slot}",
-        placeholder="Type at least 3 letters, e.g. Messi",
+@st.cache_data(show_spinner=False)
+def cached_pdf(
+    players: list[dict[str, Any]], valuations: list[dict[str, float]]
+) -> bytes:
+    """Create a report once for an unchanged comparison."""
+    return generate_valuation_pdf(players, valuations)
+
+
+def blended_value(values: dict[str, float]) -> float:
+    """Return the documented equal-weight average of all valuation methods."""
+    return sum(values.values()) / len(values)
+
+
+def _report_stem(players: list[dict[str, Any]]) -> str:
+    names = "-vs-".join(str(player.get("name") or "player") for player in players)
+    ascii_names = (
+        unicodedata.normalize("NFKD", names).encode("ascii", "ignore").decode()
     )
-    if len(query.strip()) < 3:
-        st.caption("Enter at least three characters.")
-        return None
-    try:
-        options = cached_search(query.strip(), api_key)
-    except FootballAPIError as exc:
-        st.error(str(exc))
-        return None
-    if not options:
-        st.warning("No matching players.")
-        return None
-    return st.selectbox(
-        f"Select player {slot}",
-        options,
-        format_func=lambda option: option.label,
-        key=f"player_{slot}",
-    )
+    slug = re.sub(r"[^a-z0-9]+", "-", ascii_names.lower()).strip("-")
+    return f"footy-scout-{slug or 'comparison'}"
 
 
-def player_summary(player: dict, result: ValuationResult) -> None:
-    title, portrait = st.columns([5, 1])
-    title.subheader(player["name"])
-    title.caption(
-        f"{player['team']} · {player['league']} · {player['position']} · {player['nationality']}"
-    )
-    if player.get("photo"):
-        portrait.image(player["photo"], width=78)
-    columns = st.columns(4)
-    for column, label, value in zip(
-        columns,
-        ["Age", "Appearances", "Rating", "ML estimate"],
-        [player["age"], player["appearances"], player["rating"] or "—", f"€{result.value_millions:.2f}M"],
-    ):
-        column.metric(label, value)
-    st.dataframe(
-        pd.DataFrame(
+def export_frame(
+    players: list[dict[str, Any]],
+    valuations: list[dict[str, float]],
+    blended_values: list[float],
+) -> pd.DataFrame:
+    """Build a complete, analysis-friendly CSV representation."""
+    rows = []
+    for player, values, blended in zip(players, valuations, blended_values):
+        rows.append(
             {
-                "Metric": ["Minutes", "Goals", "Assists", "Key passes", "Tackles", "Interceptions"],
-                "Value": [
-                    player["minutes"],
-                    player["goals"],
-                    player["assists"],
-                    player["key_passes"],
-                    player["tackles"],
-                    player["interceptions"],
-                ],
+                "Player": player.get("name"),
+                "Team(s)": included_items(player, "teams", "team"),
+                "Competition(s)": included_items(player, "competitions", "league"),
+                "Season": player.get("season"),
+                "Position": player.get("position"),
+                "Age": player.get("age"),
+                "Appearances": player.get("games"),
+                "Minutes": player.get("minutes"),
+                "Rating": player.get("rating"),
+                "Goals": player.get("goals"),
+                "Goals per 90": per_90(player.get("goals"), player.get("minutes")),
+                "Assists": player.get("assists"),
+                "Assists per 90": per_90(player.get("assists"), player.get("minutes")),
+                "Tackles per 90": per_90(player.get("tackles"), player.get("minutes")),
+                "Interceptions per 90": per_90(
+                    player.get("interceptions"), player.get("minutes")
+                ),
+                "Saves per 90": per_90(player.get("saves"), player.get("minutes")),
+                "Clean sheets": player.get("clean_sheets"),
+                "Heuristic (EUR M)": values["Heuristic"],
+                "Demo ML (EUR M)": values["Demo ML"],
+                "Blended (EUR M)": blended,
             }
-        ),
-        hide_index=True,
-        use_container_width=True,
-    )
-
-
-def radar_chart(first: dict, second: dict) -> go.Figure:
-    evidence = feature_comparison(first, second)
-    labels = [item["metric"] for item in evidence]
-    labels_closed = labels + [labels[0]]
-    figure = go.Figure()
-    for player, key, color in [
-        (first, "first_normalized", "#2d6a4f"),
-        (second, "second_normalized", "#f59e0b"),
-    ]:
-        values = [item[key] for item in evidence]
-        figure.add_trace(
-            go.Scatterpolar(
-                r=values + [values[0]],
-                theta=labels_closed,
-                fill="toself",
-                name=player["name"],
-                line_color=color,
-                opacity=0.72,
-            )
         )
-    figure.update_layout(
-        polar={"radialaxis": {"visible": True, "range": [0, 100]}},
-        margin={"l": 35, "r": 35, "t": 30, "b": 30},
-        height=440,
-        legend={"orientation": "h"},
-    )
-    return figure
+    return pd.DataFrame(rows)
 
+
+def render_methodology() -> None:
+    """Explain the deliberately limited educational valuation models."""
+    with st.expander("Methodology & limitations"):
+        st.markdown(
+            """
+            - **Heuristic** uses bounded, position-aware per-90 output, age and availability.
+            - **Demo ML** is a constrained model trained on a small synthetic sample. It is a product demonstration, not a market model.
+            - **Blended estimate** gives the two methods equal weight. Their spread shows disagreement, not a confidence interval.
+
+            Contract length, club finances, injury history, league strength and real transfer comparables are not included. Treat every value as an educational signal, never an official valuation.
+            """
+        )
+
+
+def render_demo_setup() -> tuple[list[dict[str, Any]], str]:
+    """Render the frictionless fictional-player picker."""
+    names = demo_player_names()
+    st.html(sidebar_step_html(2, "Build the matchup", "Pick any two players"))
+
+    first_name = st.selectbox(
+        "Player A",
+        names,
+        index=0,
+        key="demo_player_a",
+        width="stretch",
+    )
+    second_name = st.selectbox(
+        "Player B",
+        names,
+        index=1,
+        key="demo_player_b",
+        width="stretch",
+    )
+    st.html(player_key_html())
+
+    if first_name == second_name:
+        st.error("Choose two different players. Keeping the last valid matchup.")
+    else:
+        st.session_state["demo_result_names"] = (first_name, second_name)
+
+    result_names = st.session_state.get("demo_result_names", (names[0], names[1]))
+    if result_names[0] == result_names[1]:
+        result_names = (names[0], names[1])
+
+    st.html(sidebar_step_html(3, "Read the report", "The dashboard updates live"))
+    st.caption("Fictional sample data · no credentials needed")
+    return [get_demo_player(name) for name in result_names], "Demo data · 2025"
+
+
+def render_live_setup(configured_key: str) -> tuple[list[dict[str, Any]] | None, str]:
+    """Render live API setup and keep the last successful result available."""
+    if configured_key:
+        st.badge("Server API key ready", color="green")
+    else:
+        st.badge("API key needed", color="gray")
+
+    st.html(sidebar_step_html(2, "Build the matchup", "Use API-Football player IDs"))
+    with st.form("live_comparison_form"):
+        season = st.number_input(
+            "Season start year",
+            min_value=2000,
+            max_value=date.today().year,
+            value=date.today().year - 1,
+            key="live_season",
+        )
+        player1_id = st.number_input(
+            "Player A ID",
+            min_value=1,
+            value=282,
+            key="live_player_a_id",
+        )
+        player2_id = st.number_input(
+            "Player B ID",
+            min_value=1,
+            value=874,
+            key="live_player_b_id",
+        )
+        with st.expander("API connection", expanded=not bool(configured_key)):
+            api_key_override = st.text_input(
+                "API key override",
+                value="",
+                type="password",
+                key="api_key_override",
+                help=(
+                    "Optional when a server key is configured. It is used only for "
+                    "this request and is never written to disk."
+                ),
+            )
+        submitted = st.form_submit_button(
+            "Run live comparison",
+            type="primary",
+            width="stretch",
+        )
+
+    st.html(player_key_html())
+    st.caption("Competition rows returned by the API are combined.")
+
+    if submitted:
+        if player1_id == player2_id:
+            st.error("Choose two different player IDs.")
+        else:
+            api_key = api_key_override.strip() or configured_key
+            if not api_key:
+                st.error("Enter an API-Football key to run this comparison.")
+            else:
+                try:
+                    with st.spinner(f"Fetching the {season} season…"):
+                        live_players = [
+                            cached_player(int(player1_id), str(season), api_key),
+                            cached_player(int(player2_id), str(season), api_key),
+                        ]
+                    st.session_state["live_result"] = {
+                        "players": live_players,
+                        "season": str(season),
+                    }
+                except FootballAPIError as exc:
+                    st.error(str(exc))
+                    if st.session_state.get("live_result"):
+                        st.warning("Keeping the last successful live comparison.")
+
+    st.html(sidebar_step_html(3, "Read the report", "Results stay until replaced"))
+    saved_result = st.session_state.get("live_result")
+    if not saved_result:
+        return None, "Live API · awaiting matchup"
+    return (
+        saved_result["players"],
+        f"API-Football · {saved_result['season']}",
+    )
+
+
+configured_key = get_api_key()
+players: list[dict[str, Any]] | None
 
 with st.sidebar:
-    st.header("Configuration")
-    default_key = get_secret("API_SPORTS_KEY") or get_secret("RAPIDAPI_KEY") or ""
-    api_key = st.text_input(
-        "API-Sports key",
-        value=default_key,
-        type="password",
-        help="Direct key from dashboard.api-football.com. The field is not persisted.",
-    ).strip()
-    season = st.number_input(
-        "Season start year",
-        min_value=2010,
-        max_value=date.today().year,
-        value=date.today().year - 1,
+    st.html(sidebar_brand_html())
+    st.html(sidebar_step_html(1, "Choose the source", "Explore or connect live data"))
+    source = st.segmented_control(
+        "Data source",
+        ("Demo data", "Live API"),
+        default="Demo data",
+        key="source_mode",
+        label_visibility="collapsed",
+        width="stretch",
     )
-    enable_llm = st.toggle("Use optional AI explanation", value=False)
-    if enable_llm:
-        openai_key = st.text_input(
-            "OpenAI API key",
-            value=get_secret("OPENAI_API_KEY") or "",
-            type="password",
-        ).strip()
+    if source == "Live API":
+        players, source_note = render_live_setup(configured_key)
     else:
-        openai_key = ""
-    st.divider()
-    metrics = evaluate_demo_model()
-    st.caption("Bundled regression baseline")
-    st.metric("Synthetic holdout MAE", f"€{metrics['mae_millions']:.2f}M")
-    st.caption(f"R² {metrics['r2']} · {metrics['test_rows']} test rows")
+        players, source_note = render_demo_setup()
 
-st.markdown("### Find two players")
-if not api_key:
-    st.info("Enter your direct API-Sports key in the sidebar to begin.")
-    st.stop()
-
-search_left, search_right = st.columns(2, gap="large")
-with search_left:
-    first_option = search_box(1, api_key)
-with search_right:
-    second_option = search_box(2, api_key)
-
-compare = st.button(
-    "Compare selected players",
-    type="primary",
-    disabled=not first_option or not second_option,
-    use_container_width=True,
+st.html(masthead_html(source_note))
+st.title("Compare the season. See the edge.")
+st.html(
+    """
+    <p class="fs-deck">
+      Put two players on the same canvas. Read their output, role signals and
+      transparent valuation estimates without digging through disconnected tables.
+    </p>
+    """
 )
-if not compare:
-    st.caption("Search results and statistics are cached to protect the 100-request daily allowance.")
-    st.stop()
-if first_option.id == second_option.id:
-    st.error("Choose two different players.")
-    st.stop()
 
-try:
-    with st.spinner("Fetching season statistics…"):
-        players = [
-            cached_stats(first_option.id, int(season), api_key),
-            cached_stats(second_option.id, int(season), api_key),
-        ]
-except FootballAPIError as exc:
-    st.error(str(exc))
+if players is None:
+    st.info(
+        "Set up a live comparison in the sidebar, or switch to Demo data to explore "
+        "the complete experience immediately."
+    )
+    render_methodology()
     st.stop()
 
-results = [predict_value(player) for player in players]
-st.divider()
-left, right = st.columns(2, gap="large")
-with left:
-    player_summary(players[0], results[0])
-with right:
-    player_summary(players[1], results[1])
+valuations = [compare_methods(player) for player in players]
+blended_values = [blended_value(values) for values in valuations]
 
-st.markdown("### Performance profile")
-st.plotly_chart(radar_chart(players[0], players[1]), use_container_width=True)
-st.caption("Each radar axis is normalized to the stronger of the two selected players; it is comparative, not absolute.")
+st.html(matchup_html(players, valuations, blended_values))
 
-explanation = llm_explanation(
-    players[0], players[1], results[0], results[1], openai_key if enable_llm else None
+st.html(
+    section_header_html(
+        "Season overview",
+        "The essentials, aligned",
+        "Availability and form in one glance",
+    )
 )
-st.markdown("### Why the estimates differ")
-st.write(explanation)
-st.warning(results[0].caveat, icon="⚠️")
+st.html(overview_html(players))
 
-summary = pd.DataFrame(
-    [
-        {
-            "Player": player["name"],
-            "Position": player["position"],
-            "Age": player["age"],
-            "Rating": player["rating"],
-            "Estimate (€M)": result.value_millions,
-        }
-        for player, result in zip(players, results)
-    ]
+st.html(
+    section_header_html(
+        "Quick read",
+        "Where the edge shows up",
+        "Directional signals, not a scouting verdict",
+    )
 )
-st.dataframe(summary, hide_index=True, use_container_width=True)
-st.download_button(
-    "Download comparison PDF",
-    generate_valuation_pdf(players, results, explanation),
-    "footballscout_comparison.pdf",
-    "application/pdf",
+st.html(insights_html(players))
+
+st.html(
+    section_header_html(
+        "Performance duel",
+        "Output in context",
+        "Per-90 rates normalize playing time",
+    )
+)
+st.html(performance_duel_html(players))
+
+st.html(
+    section_header_html(
+        "Valuation lab",
+        "Two methods, one clear comparison",
+        "Educational models · equal-weight blend",
+    )
+)
+st.html(valuation_lab_html(players, valuations))
+render_methodology()
+
+comparison_export = export_frame(players, valuations, blended_values)
+stem = _report_stem(players)
+with st.container(key="export_tray"):
+    intro, pdf_column, csv_column = st.columns(
+        [1.65, 1, 1], gap="medium", vertical_alignment="center"
+    )
+    with intro:
+        st.subheader("Take the report with you")
+        st.caption("A polished PDF for sharing, or structured CSV for deeper work.")
+    with pdf_column:
+        st.download_button(
+            "Download PDF",
+            data=cached_pdf(players, valuations),
+            file_name=f"{stem}.pdf",
+            mime="application/pdf",
+            type="primary",
+            on_click="ignore",
+            key="download_pdf",
+            width="stretch",
+        )
+    with csv_column:
+        st.download_button(
+            "Download CSV",
+            data=comparison_export.to_csv(index=False).encode("utf-8"),
+            file_name=f"{stem}.csv",
+            mime="text/csv",
+            on_click="ignore",
+            key="download_csv",
+            width="stretch",
+        )
+
+st.caption(
+    "Educational estimates only · not financial advice or official market values"
 )
