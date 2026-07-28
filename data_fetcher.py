@@ -1,165 +1,294 @@
-"""API-Football client with a stable, testable domain model."""
+"""API-Football client and response normalisation."""
 
 from __future__ import annotations
 
+import math
 import os
-from dataclasses import dataclass
+from collections import defaultdict
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 import requests
 
-BASE_URL = "https://v3.football.api-sports.io"
+API_URL = "https://api-football-v1.p.rapidapi.com/v3/players"
 
 
 class FootballAPIError(RuntimeError):
-    """An actionable API error safe to show in the UI."""
+    """A user-facing API error."""
 
 
-@dataclass(frozen=True)
-class PlayerOption:
-    id: int
-    name: str
-    age: int | None = None
-    nationality: str = ""
-    photo: str = ""
-
-    @property
-    def label(self) -> str:
-        details = " · ".join(filter(None, [self.nationality, f"age {self.age}" if self.age else ""]))
-        return f"{self.name} ({self.id})" + (f" — {details}" if details else "")
-
-
-def get_secret(name: str) -> str | None:
-    """Read environment first, then Streamlit secrets without noisy missing-file errors."""
-    if value := os.getenv(name):
-        return value
-    locations = (Path.cwd() / ".streamlit/secrets.toml", Path.home() / ".streamlit/secrets.toml")
-    if not any(path.is_file() for path in locations):
-        return None
-    try:
-        import streamlit as st
-
-        value = st.secrets.get(name)
-        return str(value) if value else None
-    except (FileNotFoundError, KeyError):
-        return None
-
-
-class FootballClient:
-    def __init__(self, api_key: str, timeout: int = 15, session: requests.Session | None = None):
-        if not api_key.strip():
-            raise ValueError("An API-Sports key is required.")
-        self.api_key = api_key.strip()
-        self.timeout = timeout
-        self.session = session or requests.Session()
-
-    def _get(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
+def get_api_key() -> str | None:
+    """Read the key from Streamlit secrets first, then the environment."""
+    secret_locations = (
+        Path.cwd() / ".streamlit" / "secrets.toml",
+        Path.home() / ".streamlit" / "secrets.toml",
+    )
+    if any(path.is_file() for path in secret_locations):
         try:
-            response = self.session.get(
-                f"{BASE_URL}{path}",
-                headers={"x-apisports-key": self.api_key},
-                params=params,
-                timeout=self.timeout,
-            )
-            response.raise_for_status()
-            payload = response.json()
-        except requests.Timeout as exc:
-            raise FootballAPIError("API-Football timed out. Please retry.") from exc
-        except requests.HTTPError as exc:
-            status = exc.response.status_code if exc.response is not None else "unknown"
-            hints = {
-                401: "Check that the API key is correct.",
-                403: "This key is not authorized. Use a direct API-Sports Football key.",
-                429: "The daily API quota or rate limit has been reached.",
-            }
-            raise FootballAPIError(hints.get(status, f"API-Football returned HTTP {status}.")) from exc
-        except (requests.RequestException, ValueError) as exc:
-            raise FootballAPIError(f"Could not read API-Football: {exc}") from exc
+            import streamlit as st
 
-        errors = payload.get("errors")
-        if errors:
-            raise FootballAPIError(f"API-Football rejected the request: {errors}")
-        return payload
+            secret_key = st.secrets.get("RAPIDAPI_KEY")
+            if secret_key and str(secret_key).strip():
+                return str(secret_key).strip()
+        except (FileNotFoundError, KeyError):
+            pass
 
-    def search_players(self, query: str) -> list[PlayerOption]:
-        query = query.strip()
-        if len(query) < 3:
-            raise FootballAPIError("Enter at least three characters to search.")
-        payload = self._get("/players/profiles", {"search": query})
-        options: list[PlayerOption] = []
-        for item in payload.get("response") or []:
-            player = item.get("player", item)
-            if player.get("id") and player.get("name"):
-                options.append(
-                    PlayerOption(
-                        id=int(player["id"]),
-                        name=str(player["name"]),
-                        age=_optional_int(player.get("age")),
-                        nationality=str(player.get("nationality") or ""),
-                        photo=str(player.get("photo") or ""),
-                    )
-                )
-        return options
-
-    def player_stats(self, player_id: int, season: int) -> dict[str, Any]:
-        payload = self._get("/players", {"id": int(player_id), "season": int(season)})
-        return parse_player_stats(payload)
+    environment_key = os.getenv("RAPIDAPI_KEY")
+    return (
+        environment_key.strip() if environment_key and environment_key.strip() else None
+    )
 
 
-def _optional_int(value: Any) -> int | None:
-    return int(value) if value not in (None, "") else None
-
-
-def _number(value: Any) -> int:
-    return int(value or 0)
-
-
-def parse_player_stats(payload: dict[str, Any]) -> dict[str, Any]:
-    """Normalize API data and aggregate a player's clubs for the selected season."""
-    responses = payload.get("response") or []
-    if not responses:
-        raise FootballAPIError("No statistics were found for that player and season.")
+def _finite_number(value: Any) -> float | None:
+    """Return a finite number, or ``None`` for absent/malformed API values."""
+    if value is None or isinstance(value, bool):
+        return None
     try:
-        player = responses[0]["player"]
-        entries = responses[0]["statistics"]
-    except (KeyError, TypeError) as exc:
-        raise FootballAPIError("API-Football returned an unexpected data shape.") from exc
-    if not entries:
-        raise FootballAPIError("The player exists, but has no statistics for that season.")
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) else None
 
-    def total(group: str, key: str) -> int:
-        return sum(_number((entry.get(group) or {}).get(key)) for entry in entries)
 
-    primary = max(entries, key=lambda entry: _number((entry.get("games") or {}).get("minutes")))
-    games = primary.get("games") or {}
-    ratings = [
-        float((entry.get("games") or {}).get("rating"))
-        for entry in entries
-        if (entry.get("games") or {}).get("rating")
-    ]
+def _count(value: Any) -> int:
+    """Normalise cumulative statistics to non-negative integer counts."""
+    number = _finite_number(value)
+    return max(0, int(number)) if number is not None else 0
+
+
+def _text(value: Any, default: str = "Unknown") -> str:
+    if not isinstance(value, str):
+        return default
+    value = value.strip()
+    return value or default
+
+
+def _section(row: Mapping[str, Any], name: str) -> Mapping[str, Any]:
+    section = row.get(name)
+    return section if isinstance(section, Mapping) else {}
+
+
+def _display_scope(names: list[str], noun: str) -> str:
+    if not names:
+        return "Unknown"
+    if len(names) == 1:
+        return names[0]
+    return f"{len(names)} {noun}"
+
+
+def parse_player_response(
+    data: dict[str, Any], season: str | int | None = None
+) -> dict[str, Any]:
+    """Convert and aggregate an API-Football player response.
+
+    API-Football returns one statistics row per team and competition.  The app
+    presents a season-wide view, so cumulative fields are summed and ratings
+    are weighted by minutes (then appearances when minutes are unavailable).
+    """
+    if not isinstance(data, Mapping) or "response" not in data:
+        raise FootballAPIError("The API returned an unexpected response format.")
+
+    responses = data.get("response")
+    if not isinstance(responses, list):
+        raise FootballAPIError("The API returned an unexpected response format.")
+    if not responses:
+        api_error = data.get("errors")
+        detail = f" ({api_error})" if api_error else ""
+        raise FootballAPIError(f"No player data was returned{detail}.")
+
+    response = responses[0]
+    if not isinstance(response, Mapping):
+        raise FootballAPIError("The API returned an unexpected response format.")
+    player_info = response.get("player")
+    statistics = response.get("statistics")
+    if not isinstance(player_info, Mapping) or not isinstance(statistics, list):
+        raise FootballAPIError("The API returned an unexpected response format.")
+
+    totals = defaultdict(int)
+    rating_total = 0.0
+    rating_weight = 0.0
+    position_weights: dict[str, float] = defaultdict(float)
+    teams: list[str] = []
+    competitions: list[str] = []
+    competition_ids: set[tuple[str, str]] = set()
+    clean_sheets_total = 0
+    clean_sheets_available = False
+    valid_rows = 0
+
+    for row_index, row in enumerate(statistics):
+        if not isinstance(row, Mapping):
+            continue
+        games = _section(row, "games")
+        goals = _section(row, "goals")
+        tackles = _section(row, "tackles")
+        if not games and not goals and not tackles:
+            continue
+        valid_rows += 1
+
+        appearances = _count(games.get("appearences"))
+        minutes = _count(games.get("minutes"))
+        totals["games"] += appearances
+        totals["minutes"] += minutes
+        totals["goals"] += _count(goals.get("total"))
+        totals["assists"] += _count(goals.get("assists"))
+        totals["conceded"] += _count(goals.get("conceded"))
+        totals["saves"] += _count(goals.get("saves"))
+        totals["tackles"] += _count(tackles.get("total"))
+        totals["interceptions"] += _count(tackles.get("interceptions"))
+
+        rating = _finite_number(games.get("rating"))
+        if rating is not None:
+            weight = float(minutes or appearances or 1)
+            rating_total += min(max(rating, 0.0), 10.0) * weight
+            rating_weight += weight
+
+        position = _text(games.get("position"))
+        if position != "Unknown":
+            position_weights[position] += float(minutes or appearances or 1)
+
+        team = _section(row, "team")
+        team_name = _text(team.get("name"))
+        if team_name != "Unknown" and team_name not in teams:
+            teams.append(team_name)
+
+        league = _section(row, "league")
+        league_name = _text(league.get("name"))
+        if league_name != "Unknown" and league_name not in competitions:
+            competitions.append(league_name)
+        league_id = league.get("id")
+        if league_id is not None:
+            competition_ids.add(("id", str(league_id)))
+        elif league_name != "Unknown":
+            competition_ids.add(("name", league_name.casefold()))
+        else:
+            competition_ids.add(("row", str(row_index)))
+
+        for field in ("cleansheets", "clean_sheets"):
+            if field not in games:
+                continue
+            clean_sheets = _finite_number(games.get(field))
+            if clean_sheets is not None:
+                clean_sheets_available = True
+                clean_sheets_total += max(0, int(clean_sheets))
+            break
+
+    if valid_rows == 0:
+        raise FootballAPIError("The API returned no usable player statistics.")
+
+    parameters = data.get("parameters")
+    response_season = (
+        parameters.get("season") if isinstance(parameters, Mapping) else None
+    )
+    season_label = _text(season if season is not None else response_season)
+    position = (
+        max(position_weights, key=position_weights.get)
+        if position_weights
+        else "Unknown"
+    )
+    photo = player_info.get("photo")
+
+    age = _finite_number(player_info.get("age"))
+    scope = (
+        competitions[0]
+        if valid_rows == 1 and len(competitions) == 1
+        else "All teams and competitions"
+    )
+
     return {
-        "id": int(player["id"]),
-        "name": str(player.get("name") or "Unknown"),
-        "photo": str(player.get("photo") or ""),
-        "age": _number(player.get("age")),
-        "nationality": str(player.get("nationality") or "Unknown"),
-        "team": str((primary.get("team") or {}).get("name") or "Unknown"),
-        "league": str((primary.get("league") or {}).get("name") or "Unknown"),
-        "position": str(games.get("position") or "Unknown"),
-        "appearances": total("games", "appearences"),
-        "minutes": total("games", "minutes"),
-        "rating": round(sum(ratings) / len(ratings), 2) if ratings else 0.0,
-        "goals": total("goals", "total"),
-        "assists": total("goals", "assists"),
-        "shots": total("shots", "total"),
-        "passes": total("passes", "total"),
-        "key_passes": total("passes", "key"),
-        "tackles": total("tackles", "total"),
-        "interceptions": total("tackles", "interceptions"),
-        "duels_won": total("duels", "won"),
-        "dribbles": total("dribbles", "success"),
-        "clean_sheets": total("games", "cleansheets"),
-        "saves": total("goals", "saves"),
-        "conceded": total("goals", "conceded"),
+        "name": _text(player_info.get("name")),
+        "photo": photo.strip() if isinstance(photo, str) and photo.strip() else None,
+        "age": max(0, int(age)) if age is not None else None,
+        "team": _display_scope(teams, "teams"),
+        "league": _display_scope(competitions, "competitions"),
+        "teams": teams,
+        "competitions": competitions,
+        "position": position,
+        "games": totals["games"],
+        "minutes": totals["minutes"],
+        "rating": round(rating_total / rating_weight, 2) if rating_weight else None,
+        "goals": totals["goals"],
+        "assists": totals["assists"],
+        "conceded": totals["conceded"],
+        "saves": totals["saves"],
+        "tackles": totals["tackles"],
+        "interceptions": totals["interceptions"],
+        "clean_sheets": clean_sheets_total if clean_sheets_available else None,
+        "scope": scope,
+        "season": season_label,
+        "competition_count": max(1, len(competition_ids)),
     }
+
+
+def fetch_player_stats(
+    player_id: int, season: str = "2024", api_key: str | None = None
+) -> dict[str, Any]:
+    """Fetch and normalise one player's season statistics."""
+    try:
+        player_id_text = str(player_id).strip()
+        if not player_id_text.isdigit() or int(player_id_text) <= 0:
+            raise ValueError
+        normalised_player_id = int(player_id_text)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise FootballAPIError("Player ID must be a positive integer.") from exc
+
+    season_text = str(season).strip()
+    if len(season_text) != 4 or not season_text.isdigit():
+        raise FootballAPIError("Season must be a four-digit start year.")
+
+    key_source = api_key if api_key is not None else get_api_key()
+    key = str(key_source).strip() if key_source is not None else ""
+    if not key:
+        raise FootballAPIError(
+            "API key is missing. Enter a non-blank API-Football key or "
+            "configure RAPIDAPI_KEY."
+        )
+
+    try:
+        response = requests.get(
+            API_URL,
+            headers={
+                "X-RapidAPI-Key": key,
+                "X-RapidAPI-Host": "api-football-v1.p.rapidapi.com",
+            },
+            params={"id": normalised_player_id, "season": season_text},
+            timeout=15,
+        )
+        response.raise_for_status()
+    except requests.Timeout as exc:
+        raise FootballAPIError("The football API timed out. Please retry.") from exc
+    except requests.HTTPError as exc:
+        status = exc.response.status_code if exc.response is not None else "unknown"
+        if status == 401:
+            message = (
+                "The football API rejected the API key (HTTP 401). "
+                "Check that the key is valid."
+            )
+        elif status == 403:
+            message = (
+                "The football API denied access (HTTP 403). "
+                "Check your subscription and API permissions."
+            )
+        elif status == 429:
+            message = (
+                "The football API rate limit was reached (HTTP 429). "
+                "Wait before retrying or check your plan quota."
+            )
+        elif isinstance(status, int) and status >= 500:
+            message = (
+                f"The football API is temporarily unavailable (HTTP {status}). "
+                "Please retry shortly."
+            )
+        else:
+            message = (
+                f"The football API rejected the request (HTTP {status}). "
+                "Check the player ID and season."
+            )
+        raise FootballAPIError(message) from exc
+    except requests.RequestException as exc:
+        raise FootballAPIError(f"Could not reach the football API: {exc}") from exc
+
+    try:
+        return parse_player_response(response.json(), season=season_text)
+    except (requests.JSONDecodeError, ValueError) as exc:
+        raise FootballAPIError("The football API returned invalid JSON.") from exc
