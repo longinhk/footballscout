@@ -6,9 +6,9 @@ import math
 from dataclasses import dataclass
 from html import escape
 from typing import Any, Literal
-from urllib.parse import urlparse
 
-from valuation import per_90
+from scouting import PROFILE_DIMENSIONS, form_summary, profile_percentiles
+from valuation import per_90, valuation_confidence
 
 Player = dict[str, Any]
 ComparisonDirection = Literal["higher", "lower", "context"]
@@ -550,7 +550,7 @@ APP_CSS = """
     text-transform: uppercase;
   }
 
-  .fs-overview-facts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+  .fs-overview-facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
   .fs-fact {
     min-width: 0;
     border-radius: var(--fs-radius-sm);
@@ -582,6 +582,181 @@ APP_CSS = """
   .fs-insight-label { color: var(--fs-muted); font-size: .65rem; font-weight: 850; letter-spacing: .1em; text-transform: uppercase; }
   .fs-insight-winner { color: var(--fs-text); font-size: .95rem; font-weight: 800; margin-top: 8px; overflow-wrap: anywhere; }
   .fs-insight-detail { color: var(--fs-muted); font-size: .72rem; margin-top: 5px; line-height: 1.45; }
+
+  .fs-profile-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }
+  .fs-profile-card {
+    min-width:0;
+    border:1px solid var(--fs-line);
+    border-radius:var(--fs-radius-lg);
+    background:rgba(14,26,38,.86);
+    padding:clamp(18px,3vw,26px);
+  }
+  .fs-profile-head { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; }
+  .fs-profile-name { color:var(--fs-text); font-size:1rem; font-weight:820; }
+  .fs-profile-cohort { color:var(--fs-muted); font-size:.68rem; margin-top:4px; }
+  .fs-form-status { text-align:right; }
+  .fs-form-direction { color:var(--fs-accent); font-size:.7rem; font-weight:850; text-transform:uppercase; letter-spacing:.08em; }
+  .fs-form-average { color:var(--fs-muted); font-size:.66rem; margin-top:4px; }
+  .fs-radar-wrap { position:relative; width:min(100%,260px); aspect-ratio:1; margin:8px auto 2px; }
+  .fs-radar-wrap::before {
+    content:"";
+    position:absolute;
+    inset:19%;
+    border:1px solid var(--fs-line);
+    border-radius:50%;
+    background:
+      linear-gradient(90deg, transparent 49.7%, rgba(170,184,197,.22) 49.8% 50.2%, transparent 50.3%),
+      linear-gradient(30deg, transparent 49.7%, rgba(170,184,197,.22) 49.8% 50.2%, transparent 50.3%),
+      linear-gradient(150deg, transparent 49.7%, rgba(170,184,197,.22) 49.8% 50.2%, transparent 50.3%),
+      repeating-radial-gradient(circle, transparent 0 24%, rgba(54,80,100,.9) 24.5% 25%, transparent 25.5% 49%);
+  }
+  .fs-radar-wrap::after {
+    content:"";
+    position:absolute;
+    inset:19%;
+    clip-path:var(--radar-polygon);
+    -webkit-clip-path:var(--radar-polygon);
+    opacity:.88;
+  }
+  .fs-radar-a::after { background:rgba(67,214,197,.34); filter:drop-shadow(0 0 2px var(--fs-player-a)); }
+  .fs-radar-b::after { background:rgba(255,155,94,.34); filter:drop-shadow(0 0 2px var(--fs-player-b)); }
+  .fs-percentile-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:7px; margin-top:9px; }
+  .fs-percentile { display:flex; justify-content:space-between; gap:8px; border-radius:9px; background:var(--fs-surface-raised); padding:8px 10px; }
+  .fs-percentile span { color:var(--fs-muted); font-size:.64rem; }
+  .fs-percentile strong { color:var(--fs-text); font-size:.7rem; font-variant-numeric:tabular-nums; }
+  .fs-form-bars { height:38px; display:flex; align-items:flex-end; gap:5px; margin-top:15px; }
+  .fs-form-bars i { flex:1; min-width:6px; border-radius:3px 3px 1px 1px; opacity:.86; }
+  .fs-profile-a .fs-form-bars i { background:var(--fs-player-a); }
+  .fs-profile-b .fs-form-bars i { background:var(--fs-player-b); }
+  .fs-profile-footnote { color:var(--fs-muted); font-size:.62rem; line-height:1.45; margin-top:8px; }
+
+  .fs-pair-profile {
+    overflow:hidden;
+    border:1px solid var(--fs-line);
+    border-radius:var(--fs-radius-lg);
+    background:rgba(14,26,38,.86);
+  }
+  .fs-pair-profile-head {
+    display:grid;
+    grid-template-columns:minmax(0,1fr) minmax(112px,.48fr) minmax(0,1fr);
+    gap:16px;
+    align-items:center;
+    padding:clamp(18px,3vw,26px);
+    background:linear-gradient(90deg,rgba(67,214,197,.05),transparent 42%,rgba(255,155,94,.05));
+  }
+  .fs-pair-player { min-width:0; }
+  .fs-pair-player-b { text-align:right; }
+  .fs-pair-player-code {
+    display:block;
+    color:var(--fs-muted);
+    font-size:.61rem;
+    font-weight:900;
+    letter-spacing:.12em;
+    text-transform:uppercase;
+  }
+  .fs-pair-player-a .fs-pair-player-code { color:var(--fs-player-a); }
+  .fs-pair-player-b .fs-pair-player-code { color:var(--fs-player-b); }
+  .fs-pair-player strong {
+    display:block;
+    color:var(--fs-text);
+    font-size:.92rem;
+    line-height:1.2;
+    margin-top:5px;
+    overflow-wrap:anywhere;
+  }
+  .fs-pair-player span:last-child {
+    display:block;
+    color:var(--fs-muted);
+    font-size:.65rem;
+    margin-top:4px;
+    overflow-wrap:anywhere;
+  }
+  .fs-pair-scale-note {
+    color:var(--fs-muted);
+    font-size:.61rem;
+    font-weight:750;
+    letter-spacing:.07em;
+    line-height:1.45;
+    text-align:center;
+    text-transform:uppercase;
+  }
+  .fs-pair-metric {
+    display:grid;
+    grid-template-columns:minmax(0,1fr) minmax(112px,.48fr) minmax(0,1fr);
+    gap:16px;
+    align-items:center;
+    min-height:78px;
+    padding:13px clamp(18px,3vw,26px);
+    border-top:1px solid rgba(38,58,73,.72);
+  }
+  .fs-pair-side { min-width:0; }
+  .fs-pair-side-a { text-align:right; }
+  .fs-pair-side-b { text-align:left; }
+  .fs-pair-value-line { display:flex; align-items:baseline; gap:7px; }
+  .fs-pair-side-a .fs-pair-value-line { justify-content:flex-end; }
+  .fs-pair-side-b .fs-pair-value-line { justify-content:flex-start; }
+  .fs-pair-side-code {
+    color:var(--fs-muted);
+    font-size:.56rem;
+    font-weight:900;
+    letter-spacing:.1em;
+  }
+  .fs-pair-value {
+    color:var(--fs-text);
+    font-size:.86rem;
+    font-weight:820;
+    font-variant-numeric:tabular-nums;
+  }
+  .fs-pair-value.is-unavailable { color:var(--fs-muted); }
+  .fs-pair-availability {
+    display:block;
+    color:var(--fs-muted);
+    font-size:.57rem;
+    line-height:1.25;
+    margin-top:3px;
+  }
+  .fs-pair-track {
+    display:flex;
+    width:100%;
+    height:7px;
+    margin-top:8px;
+    overflow:hidden;
+    border-radius:99px;
+    background:#1b2d3b;
+  }
+  .fs-pair-track.is-unavailable { visibility:hidden; }
+  .fs-pair-side-a .fs-pair-track { justify-content:flex-end; }
+  .fs-pair-bar { display:block; height:100%; border-radius:99px; }
+  .fs-pair-bar-a { background:var(--fs-player-a); }
+  .fs-pair-bar-b { background:var(--fs-player-b); }
+  .fs-pair-metric-label { text-align:center; min-width:0; }
+  .fs-pair-metric-label strong {
+    display:block;
+    color:var(--fs-text);
+    font-size:.71rem;
+    line-height:1.25;
+  }
+  .fs-pair-metric-label span {
+    display:block;
+    color:var(--fs-muted);
+    font-size:.55rem;
+    line-height:1.25;
+    margin-top:4px;
+  }
+  .fs-pair-profile-footnote {
+    color:var(--fs-muted);
+    font-size:.63rem;
+    line-height:1.55;
+    padding:14px clamp(18px,3vw,26px) 17px;
+    border-top:1px solid rgba(38,58,73,.72);
+  }
+  .fs-pair-empty {
+    color:var(--fs-muted);
+    font-size:.78rem;
+    line-height:1.55;
+    padding:24px;
+    text-align:center;
+  }
 
   .fs-duel-panel { overflow: hidden; }
   .fs-duel-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
@@ -629,6 +804,7 @@ APP_CSS = """
   .fs-spread-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:18px; }
   .fs-spread-card { background:var(--fs-surface-raised); border-radius:var(--fs-radius-sm); padding:14px; color:var(--fs-muted); font-size:.72rem; }
   .fs-spread-card strong { display:block; color:var(--fs-text); font-size:.92rem; margin-top:4px; font-variant-numeric:tabular-nums; }
+  .fs-spread-card span { display:block; color:var(--fs-muted); font-size:.66rem; margin-top:4px; font-variant-numeric:tabular-nums; }
 
   .st-key-export_tray {
     margin-top: 2.25rem;
@@ -641,6 +817,19 @@ APP_CSS = """
   .st-key-export_tray p { color:var(--fs-muted); }
   .st-key-export_tray [data-testid="stDownloadButton"] button { width:100%; }
 
+  .st-key-action_tray {
+    margin-top:1rem;
+    padding:14px;
+    border:1px solid var(--fs-line);
+    border-radius:var(--fs-radius-md);
+    background:rgba(19,35,49,.48);
+  }
+  .st-key-action_tray [data-testid="stButton"] button { width:100%; }
+  .fs-library-list { display:grid; gap:7px; margin:.4rem 0 .8rem; }
+  .fs-library-item { border:1px solid var(--fs-line); border-radius:9px; padding:8px 10px; background:var(--fs-surface); }
+  .fs-library-item strong { display:block; color:var(--fs-text); font-size:.72rem; }
+  .fs-library-item span { display:block; color:var(--fs-muted); font-size:.62rem; margin-top:2px; }
+
   @media (max-width: 900px) {
     .block-container { padding-left: 1.25rem; padding-right: 1.25rem; }
     .fs-stage-grid { grid-template-columns: 1fr; }
@@ -651,6 +840,7 @@ APP_CSS = """
     .fs-overview-divider { height:1px; }
     .fs-overview-facts { grid-template-columns:repeat(2,minmax(0,1fr)); }
     .fs-insights { grid-template-columns:1fr; }
+    .fs-profile-grid { grid-template-columns:1fr; }
     .fs-valuation-method { grid-template-columns:1fr; gap:10px; }
     .fs-method-copy { order:-1; text-align:left; }
     .fs-method-side-b { text-align:left; }
@@ -685,6 +875,18 @@ APP_CSS = """
     .fs-duel-value-row { justify-content:center !important; }
     .fs-lead-badge { display:none; }
     .fs-spread-grid { grid-template-columns:1fr; }
+    .fs-percentile-grid { grid-template-columns:1fr; }
+    .fs-pair-profile-head,
+    .fs-pair-metric { grid-template-columns:minmax(0,1fr) 88px minmax(0,1fr); gap:8px; }
+    .fs-pair-profile-head { padding:16px 12px; }
+    .fs-pair-metric { min-height:74px; padding:12px; }
+    .fs-pair-player strong { font-size:.78rem; }
+    .fs-pair-player span:last-child,
+    .fs-pair-scale-note { font-size:.55rem; }
+    .fs-pair-track { height:6px; }
+    .fs-pair-metric-label strong { font-size:.64rem; }
+    .fs-pair-side-code { display:none; }
+    .st-key-action_tray [data-testid="stHorizontalBlock"] { flex-direction:column; }
     .st-key-export_tray [data-testid="stHorizontalBlock"] { flex-direction:column; }
   }
 
@@ -704,6 +906,138 @@ class MetricSpec:
     rate: bool = False
     direction: ComparisonDirection = "higher"
     hint: str = ""
+
+
+_PAIR_PROFILE_SPECS = {
+    "rating": MetricSpec(
+        "Profile", "Season rating", "rating", decimals=2, hint="0–10 scale"
+    ),
+    "goals": MetricSpec(
+        "Profile", "Goals / 90", "goals", decimals=2, rate=True, hint="Per 90 minutes"
+    ),
+    "assists": MetricSpec(
+        "Profile",
+        "Assists / 90",
+        "assists",
+        decimals=2,
+        rate=True,
+        hint="Per 90 minutes",
+    ),
+    "shots": MetricSpec(
+        "Profile", "Shots / 90", "shots", decimals=2, rate=True, hint="Per 90 minutes"
+    ),
+    "key_passes": MetricSpec(
+        "Profile",
+        "Key passes / 90",
+        "key_passes",
+        decimals=2,
+        rate=True,
+        hint="Per 90 minutes",
+    ),
+    "pass_accuracy": MetricSpec(
+        "Profile", "Pass accuracy", "pass_accuracy", decimals=1, hint="Percentage"
+    ),
+    "tackles": MetricSpec(
+        "Profile",
+        "Tackles / 90",
+        "tackles",
+        decimals=2,
+        rate=True,
+        hint="Per 90 minutes",
+    ),
+    "interceptions": MetricSpec(
+        "Profile",
+        "Interceptions / 90",
+        "interceptions",
+        decimals=2,
+        rate=True,
+        hint="Per 90 minutes",
+    ),
+    "duels_won_pct": MetricSpec(
+        "Profile", "Duels won", "duels_won_pct", decimals=1, hint="Percentage"
+    ),
+    "saves": MetricSpec(
+        "Goalkeeping",
+        "Saves / 90",
+        "saves",
+        decimals=2,
+        rate=True,
+        hint="Per 90 minutes",
+    ),
+    "conceded": MetricSpec(
+        "Goalkeeping",
+        "Goals conceded / 90",
+        "conceded",
+        decimals=2,
+        rate=True,
+        direction="lower",
+        hint="Lower is better",
+    ),
+    "clean_sheets": MetricSpec(
+        "Goalkeeping", "Clean sheets", "clean_sheets", hint="Season total"
+    ),
+}
+
+_PAIR_PROFILE_ORDERS = {
+    "attacker": (
+        "rating",
+        "goals",
+        "assists",
+        "shots",
+        "key_passes",
+        "pass_accuracy",
+        "duels_won_pct",
+        "tackles",
+    ),
+    "midfielder": (
+        "rating",
+        "key_passes",
+        "assists",
+        "tackles",
+        "interceptions",
+        "pass_accuracy",
+        "duels_won_pct",
+        "goals",
+    ),
+    "defender": (
+        "rating",
+        "tackles",
+        "interceptions",
+        "duels_won_pct",
+        "pass_accuracy",
+        "goals",
+        "assists",
+        "key_passes",
+    ),
+    "goalkeeper": (
+        "rating",
+        "saves",
+        "conceded",
+        "clean_sheets",
+        "pass_accuracy",
+        "duels_won_pct",
+    ),
+    "mixed": (
+        "rating",
+        "goals",
+        "assists",
+        "key_passes",
+        "pass_accuracy",
+        "tackles",
+        "interceptions",
+        "duels_won_pct",
+    ),
+    "cross_goalkeeper": (
+        "rating",
+        "goals",
+        "assists",
+        "saves",
+        "conceded",
+        "pass_accuracy",
+        "duels_won_pct",
+        "clean_sheets",
+    ),
+}
 
 
 def _number(value: Any) -> float | None:
@@ -726,14 +1060,6 @@ def display_number(value: Any, decimals: int = 0) -> str:
 def _initials(name: Any) -> str:
     words = [word for word in str(name or "Player").replace("-", " ").split() if word]
     return "".join(word[0] for word in words[:2]).upper() or "P"
-
-
-def _safe_photo_url(value: Any) -> str | None:
-    if not isinstance(value, str):
-        return None
-    url = value.strip()
-    parsed = urlparse(url)
-    return url if parsed.scheme in {"http", "https"} and parsed.netloc else None
 
 
 def included_items(player: Player, plural_key: str, fallback_key: str) -> str:
@@ -804,14 +1130,7 @@ def section_header_html(kicker: str, title: str, note: str = "") -> str:
 
 def _avatar_html(player: Player, side: str) -> str:
     name = str(player.get("name") or "Unknown player")
-    photo_url = _safe_photo_url(player.get("photo"))
-    if photo_url:
-        content = (
-            f'<img src="{escape(photo_url, quote=True)}" '
-            f'alt="Portrait of {escape(name, quote=True)}">'
-        )
-    else:
-        content = f'<span aria-hidden="true">{escape(_initials(name))}</span>'
+    content = f'<span aria-hidden="true">{escape(_initials(name))}</span>'
     return f'<div class="fs-avatar fs-avatar-{side}">{content}</div>'
 
 
@@ -822,10 +1141,12 @@ def _player_stage_html(
     side: str,
 ) -> str:
     name = str(player.get("name") or "Unknown player")
-    low, high = min(values.values()), max(values.values())
+    reliability = valuation_confidence(player, values)
     chips = [
         f"Season {player.get('season') or '—'}",
         str(player.get("scope") or player.get("league") or "Competition unavailable"),
+        str(player.get("nationality") or "Nationality unavailable"),
+        f"{player.get('preferred_foot') or 'Unknown'} foot",
     ]
     chip_html = "".join(
         f'<span class="fs-chip">{escape(chip)}</span>' for chip in chips
@@ -844,7 +1165,7 @@ def _player_stage_html(
       <div class="fs-estimate">
         <div class="fs-estimate-label">Blended estimate</div>
         <div class="fs-estimate-value">€{blended:,.2f}M</div>
-        <div class="fs-estimate-range">Method range €{low:,.2f}M–€{high:,.2f}M</div>
+        <div class="fs-estimate-range">Illustrative range €{reliability['low']:,.2f}M–€{reliability['high']:,.2f}M · {reliability['label']} reliability ({reliability['score']}/100)</div>
       </div>
     </article>
     """
@@ -904,6 +1225,15 @@ def _overview_side_html(player: Player, side: str) -> str:
         + _fact_html("Appearances", display_number(player.get("games")), None, side)
         + _fact_html("Minutes", display_number(player.get("minutes")), None, side)
         + _fact_html("Season rating", display_number(rating, 2), rating, side)
+        + _fact_html(
+            "Contract remaining",
+            f"{display_number(player.get('contract_years'))} yrs",
+            None,
+            side,
+        )
+        + _fact_html(
+            "Injury risk", str(player.get("injury_risk") or "Unknown"), None, side
+        )
     )
     return f"""
     <div class="fs-overview-side fs-overview-{side}">
@@ -933,8 +1263,20 @@ def performance_specs(players: list[Player]) -> list[MetricSpec]:
         MetricSpec("Usage", "Season rating", "rating", decimals=2),
         MetricSpec("Attack", "Goals", "goals"),
         MetricSpec("Attack", "Goals / 90", "goals", decimals=2, rate=True),
+        MetricSpec("Attack", "Shots / 90", "shots", decimals=2, rate=True),
         MetricSpec("Attack", "Assists", "assists"),
         MetricSpec("Attack", "Assists / 90", "assists", decimals=2, rate=True),
+        MetricSpec(
+            "Possession", "Key passes / 90", "key_passes", decimals=2, rate=True
+        ),
+        MetricSpec(
+            "Possession",
+            "Progressive actions / 90",
+            "progressive_actions",
+            decimals=2,
+            rate=True,
+        ),
+        MetricSpec("Possession", "Pass accuracy %", "pass_accuracy", decimals=1),
     ]
     positions = " ".join(
         str(player.get("position") or "").lower() for player in players
@@ -967,6 +1309,16 @@ def performance_specs(players: list[Player]) -> list[MetricSpec]:
         )
     if any(player.get("clean_sheets") is not None for player in players):
         specs.append(MetricSpec("Out of possession", "Clean sheets", "clean_sheets"))
+    if any(player.get("duels_won_pct") is not None for player in players):
+        specs.append(
+            MetricSpec("Out of possession", "Duels won %", "duels_won_pct", decimals=1)
+        )
+    if any(player.get("aerials_won_pct") is not None for player in players):
+        specs.append(
+            MetricSpec(
+                "Out of possession", "Aerial duels won %", "aerials_won_pct", decimals=1
+            )
+        )
     if "goalkeeper" in positions:
         specs.extend(
             [
@@ -986,6 +1338,11 @@ def performance_specs(players: list[Player]) -> list[MetricSpec]:
 
 
 def metric_value(player: Player, spec: MetricSpec) -> float | None:
+    if (
+        spec.group == "Goalkeeping"
+        and "goalkeeper" not in str(player.get("position") or "").lower()
+    ):
+        return None
     raw = _number(player.get(spec.key))
     if raw is None:
         return None
@@ -995,6 +1352,176 @@ def metric_value(player: Player, spec: MetricSpec) -> float | None:
     if minutes is None or minutes <= 0:
         return None
     return per_90(raw, minutes)
+
+
+def _role_family(player: Player) -> str:
+    position = str(player.get("position") or "").casefold()
+    if "goalkeeper" in position or position == "keeper":
+        return "goalkeeper"
+    if "defender" in position or "back" in position:
+        return "defender"
+    if "midfielder" in position or "midfield" in position:
+        return "midfielder"
+    if "attacker" in position or "forward" in position or "striker" in position:
+        return "attacker"
+    return "mixed"
+
+
+def _paired_profile_specs(players: list[Player]) -> list[MetricSpec]:
+    families = {_role_family(player) for player in players}
+    if len(families) == 1:
+        role = next(iter(families))
+    elif "goalkeeper" in families:
+        role = "cross_goalkeeper"
+    else:
+        role = "mixed"
+    preferred_keys = _PAIR_PROFILE_ORDERS[role]
+    fallback_keys = tuple(
+        key for key in _PAIR_PROFILE_SPECS if key not in preferred_keys
+    )
+    specs: list[MetricSpec] = []
+    for key in (*preferred_keys, *fallback_keys):
+        spec = _PAIR_PROFILE_SPECS[key]
+        if any(metric_value(player, spec) is not None for player in players):
+            specs.append(spec)
+        if len(specs) == 8:
+            break
+    return specs
+
+
+def _paired_profile_value(value: float | None, spec: MetricSpec) -> str:
+    if value is None:
+        return "—"
+    displayed = display_number(value, spec.decimals)
+    if spec.key in {"pass_accuracy", "duels_won_pct", "aerials_won_pct"}:
+        return f"{displayed}%"
+    return displayed
+
+
+def _paired_profile_widths(values: list[float | None], spec: MetricSpec) -> list[float]:
+    measured = [max(value, 0.0) for value in values if value is not None]
+    if spec.key == "rating" and not spec.rate:
+        scale = 10.0
+    elif spec.key in {"pass_accuracy", "duels_won_pct", "aerials_won_pct"}:
+        scale = 100.0
+    else:
+        scale = max(measured, default=0.0)
+    return [
+        (
+            0.0
+            if value is None or scale <= 0
+            else min(max(value, 0.0) / scale * 100.0, 100.0)
+        )
+        for value in values
+    ]
+
+
+def _paired_profile_side_html(
+    value: float | None,
+    width: float,
+    spec: MetricSpec,
+    side: str,
+) -> str:
+    unavailable = value is None
+    unavailable_class = " is-unavailable" if unavailable else ""
+    availability = (
+        '<span class="fs-pair-availability">Not available</span>' if unavailable else ""
+    )
+    bar = (
+        ""
+        if unavailable
+        else f'<span class="fs-pair-bar fs-pair-bar-{side}" style="width:{width:.1f}%"></span>'
+    )
+    track_class = " is-unavailable" if unavailable else ""
+    return f"""
+    <div class="fs-pair-side fs-pair-side-{side}">
+      <div class="fs-pair-value-line">
+        <span class="fs-pair-side-code">{side.upper()}</span>
+        <strong class="fs-pair-value{unavailable_class}">{escape(_paired_profile_value(value, spec))}</strong>
+      </div>
+      {availability}
+      <span class="fs-pair-track{track_class}" aria-hidden="true">{bar}</span>
+    </div>
+    """
+
+
+def _paired_profile_head_html(player: Player, side: str) -> str:
+    name = str(player.get("name") or "Unknown player")
+    position = str(player.get("position") or "Position unavailable")
+    season = str(player.get("season") or "Season unavailable")
+    return f"""
+    <div class="fs-pair-player fs-pair-player-{side}">
+      <span class="fs-pair-player-code">Player {side.upper()}</span>
+      <strong>{escape(name)}</strong>
+      <span>{escape(position)} · {escape(season)}</span>
+    </div>
+    """
+
+
+def comparison_profile_html(players: list[Player]) -> str:
+    """Render a source-agnostic paired profile from recorded season metrics.
+
+    The chart compares exactly two players without inventing cohort percentiles.
+    Ratings and percentages use their natural scale; other rows are normalized
+    only against the larger available value in that row. Missing data remains
+    visibly unavailable instead of being converted to zero.
+    """
+    if len(players) != 2:
+        raise ValueError("A comparison profile requires exactly two players.")
+
+    specs = _paired_profile_specs(players)
+    rows: list[str] = []
+    first_name = str(players[0].get("name") or "Unknown player")
+    second_name = str(players[1].get("name") or "Unknown player")
+    for spec in specs:
+        values = [metric_value(player, spec) for player in players]
+        widths = _paired_profile_widths(values, spec)
+        readable_values = [
+            "unavailable" if value is None else _paired_profile_value(value, spec)
+            for value in values
+        ]
+        accessible_label = (
+            f"{spec.label}. Player A, {first_name}: {readable_values[0]}. "
+            f"Player B, {second_name}: {readable_values[1]}. {spec.hint}"
+        ).strip()
+        hint = f"<span>{escape(spec.hint)}</span>" if spec.hint else ""
+        rows.append(
+            f"""
+            <div class="fs-pair-metric" role="group" aria-label="{escape(accessible_label)}">
+              {_paired_profile_side_html(values[0], widths[0], spec, 'a')}
+              <div class="fs-pair-metric-label">
+                <strong>{escape(spec.label)}</strong>
+                {hint}
+              </div>
+              {_paired_profile_side_html(values[1], widths[1], spec, 'b')}
+            </div>
+            """
+        )
+
+    content = (
+        "".join(rows)
+        if rows
+        else (
+            '<div class="fs-pair-empty">No comparable season metrics were '
+            "returned for these players.</div>"
+        )
+    )
+    return f"""
+    <section class="fs-pair-profile" aria-label="Paired season metric profile">
+      <div class="fs-pair-profile-head">
+        {_paired_profile_head_html(players[0], 'a')}
+        <div class="fs-pair-scale-note">Paired metric<br>same-row scale</div>
+        {_paired_profile_head_html(players[1], 'b')}
+      </div>
+      {content}
+      <div class="fs-pair-profile-footnote">
+        Bars use recorded season values. Per-90 rows adjust for playing time;
+        ratings and percentages keep their natural scales. An em dash means the
+        source did not return enough data. This view does not rank either player
+        against a wider league or position group.
+      </div>
+    </section>
+    """
 
 
 def _leader_indexes(
@@ -1111,6 +1638,89 @@ def insights_html(players: list[Player]) -> str:
     return f'<section class="fs-insights" aria-label="Quick comparison insights">{"".join(cards)}</section>'
 
 
+def _radar_html(name: str, scores: dict[str, int], side: str) -> str:
+    """Render a sanitizer-safe CSS radar without scripts or remote assets."""
+    values = [float(scores[dimension]) for dimension in PROFILE_DIMENSIONS]
+    polygon_points = []
+    for index, value in enumerate(values):
+        angle = -math.pi / 2 + index * (2 * math.pi / len(values))
+        score_ratio = min(max(value, 0.0), 100.0) / 100.0
+        x = 50.0 + math.cos(angle) * 50.0 * score_ratio
+        y = 50.0 + math.sin(angle) * 50.0 * score_ratio
+        polygon_points.append(f"{x:.1f}% {y:.1f}%")
+    polygon = ", ".join(polygon_points)
+    score_label = ", ".join(
+        f"{dimension} {scores[dimension]}" for dimension in PROFILE_DIMENSIONS
+    )
+    return (
+        f'<div class="fs-radar-wrap fs-radar-{side}" '
+        f'style="--radar-polygon:polygon({polygon})" '
+        f'aria-label="{escape(name)} role percentiles: {escape(score_label)}"></div>'
+    )
+
+
+def _ordinal(value: int) -> str:
+    if 10 <= value % 100 <= 20:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(value % 10, "th")
+    return f"{value}{suffix}"
+
+
+def _profile_card_html(player: Player, roster: list[Player], side: str) -> str:
+    name = str(player.get("name") or "Player")
+    role = str(player.get("position") or "all-role")
+    cohort_size = sum(
+        str(candidate.get("position") or "") == role for candidate in roster
+    )
+    scores = profile_percentiles(player, roster)
+    form = form_summary(player)
+    average_value = form["average"]
+    average = (
+        "No recent rating"
+        if average_value is None
+        else f"{float(average_value):.2f} average"
+    )
+    percentiles = "".join(
+        '<div class="fs-percentile">'
+        f"<span>{escape(dimension)}</span><strong>{_ordinal(scores[dimension])}</strong>"
+        "</div>"
+        for dimension in PROFILE_DIMENSIONS
+    )
+    form_bars = "".join(
+        f'<i style="height:{max(8.0, min(38.0, (float(value) - 6.0) / 2.6 * 38.0)):.1f}px" '
+        f'title="Rating {float(value):.2f}"></i>'
+        for value in form["values"]
+    )
+    return f"""
+    <article class="fs-profile-card fs-profile-{side}">
+      <div class="fs-profile-head">
+        <div>
+          <div class="fs-profile-name">{escape(name)}</div>
+          <div class="fs-profile-cohort">Compared with {cohort_size} fictional {escape(role.lower())} peers</div>
+        </div>
+        <div class="fs-form-status">
+          <div class="fs-form-direction">{escape(str(form['direction']))}</div>
+          <div class="fs-form-average">{escape(average)}</div>
+        </div>
+      </div>
+      {_radar_html(name, scores, side)}
+      <div class="fs-percentile-grid">{percentiles}</div>
+      <div class="fs-form-bars" aria-label="Six-period recent form">{form_bars}</div>
+      <div class="fs-profile-footnote">Percentiles compare positive role signals inside this bundled catalog. Recent form is fictional and shown from oldest to newest.</div>
+    </article>
+    """
+
+
+def scouting_profile_html(players: list[Player], roster: list[Player]) -> str:
+    """Render accessible, role-aware profiles for both selected players."""
+    cards = [
+        _profile_card_html(players[0], roster, "a"),
+        _profile_card_html(players[1], roster, "b"),
+    ]
+    return f'<section class="fs-profile-grid" aria-label="Role percentile profiles">{"".join(cards)}</section>'
+
+
 def valuation_lab_html(
     players: list[Player], valuations: list[dict[str, float]]
 ) -> str:
@@ -1121,6 +1731,7 @@ def valuation_lab_html(
     descriptions = {
         "Heuristic": "Bounded role model",
         "Demo ML": "Constrained synthetic model",
+        "Context": "Contract, risk and league scenario",
     }
     methods: list[str] = []
     for method in method_names:
@@ -1146,13 +1757,16 @@ def valuation_lab_html(
             </div>
             """
         )
-    spreads = [max(values.values()) - min(values.values()) for values in valuations]
+    confidence = [
+        valuation_confidence(player, values)
+        for player, values in zip(players, valuations)
+    ]
     return f"""
     <section class="fs-valuation-panel" aria-label="Valuation model comparison">
       {''.join(methods)}
       <div class="fs-spread-grid">
-        <div class="fs-spread-card">Player A · {escape(str(players[0].get('name') or 'Player'))}<strong>€{spreads[0]:,.2f}M method spread</strong></div>
-        <div class="fs-spread-card">Player B · {escape(str(players[1].get('name') or 'Player'))}<strong>€{spreads[1]:,.2f}M method spread</strong></div>
+        <div class="fs-spread-card">Player A · {escape(str(players[0].get('name') or 'Player'))}<strong>{confidence[0]['label']} reliability · {confidence[0]['score']}/100</strong><span>Scenario €{confidence[0]['low']:,.2f}M–€{confidence[0]['high']:,.2f}M</span></div>
+        <div class="fs-spread-card">Player B · {escape(str(players[1].get('name') or 'Player'))}<strong>{confidence[1]['label']} reliability · {confidence[1]['score']}/100</strong><span>Scenario €{confidence[1]['low']:,.2f}M–€{confidence[1]['high']:,.2f}M</span></div>
       </div>
     </section>
     """

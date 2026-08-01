@@ -378,9 +378,122 @@ def predict_value_ml(stats: dict[str, Any]) -> float:
     return _positive(_demo_model().predict(sample)[0])
 
 
+def calculate_context_value(stats: dict[str, Any]) -> float:
+    """Apply transparent fictional contract, risk, and league context."""
+    if not _has_season_data(stats):
+        return 0.0
+
+    performance_base = (
+        calculate_value_heuristic(stats) * 0.55 + predict_value_ml(stats) * 0.45
+    )
+    league_strength = _bounded_number(
+        stats.get("league_strength"),
+        default=0.85,
+        minimum=0.6,
+        maximum=1.2,
+    )
+    selling_power = _bounded_number(
+        stats.get("club_selling_power"),
+        default=1.0,
+        minimum=0.75,
+        maximum=1.25,
+    )
+    contract_years = _bounded_number(
+        stats.get("contract_years"),
+        default=2.0,
+        minimum=0.0,
+        maximum=6.0,
+    )
+    contract_factor = 0.82 + min(contract_years, 5.0) * 0.06
+    risk_factor = {
+        "low": 1.02,
+        "medium": 0.94,
+        "high": 0.82,
+    }.get(str(stats.get("injury_risk") or "").strip().lower(), 0.94)
+
+    contextual = (
+        performance_base
+        * league_strength
+        * selling_power
+        * contract_factor
+        * risk_factor
+    )
+    recent_fee = _bounded_number(stats.get("recent_fee"), maximum=MAX_VALUE_MILLIONS)
+    if recent_fee > 0:
+        contextual = contextual * 0.82 + recent_fee * 0.18
+    return _positive(contextual)
+
+
 def compare_methods(stats: dict[str, Any]) -> dict[str, float]:
-    """Return the two independently presented demonstration estimates."""
+    """Return three transparent educational valuation scenarios."""
     return {
         "Heuristic": calculate_value_heuristic(stats),
         "Demo ML": predict_value_ml(stats),
+        "Context": calculate_context_value(stats),
+    }
+
+
+def valuation_confidence(
+    stats: dict[str, Any], values: dict[str, float] | None = None
+) -> dict[str, float | int | str]:
+    """Return a reliability score and illustrative scenario range.
+
+    The range is a product scenario, not a statistically calibrated confidence
+    interval. Reliability rewards sample size, contextual completeness, stable
+    recent form, and agreement between the three methods.
+    """
+    method_values = values or compare_methods(stats)
+    finite_values = [
+        _bounded_number(value, maximum=MAX_VALUE_MILLIONS)
+        for value in method_values.values()
+    ]
+    if not finite_values or not _has_season_data(stats):
+        return {"score": 0, "label": "Low", "low": 0.0, "high": 0.0}
+
+    minutes = _stat(stats, "minutes")
+    sample_score = min(minutes / 2_700.0, 1.0)
+    context_fields = (
+        "contract_years",
+        "injury_risk",
+        "league_strength",
+        "club_selling_power",
+        "recent_fee",
+    )
+    completeness = sum(stats.get(field) not in (None, "") for field in context_fields)
+    completeness_score = completeness / len(context_fields)
+
+    average = sum(finite_values) / len(finite_values)
+    spread = max(finite_values) - min(finite_values)
+    agreement_score = max(0.0, 1.0 - spread / max(average, 1.0))
+
+    form_values = [
+        _bounded_number(value, maximum=10.0)
+        for value in stats.get("form", [])
+        if value is not None
+    ]
+    if len(form_values) >= 2:
+        form_spread = max(form_values) - min(form_values)
+        stability_score = max(0.0, 1.0 - form_spread / 2.0)
+    else:
+        stability_score = 0.35
+
+    score = int(
+        round(
+            sample_score * 35
+            + completeness_score * 25
+            + agreement_score * 30
+            + stability_score * 10
+        )
+    )
+    score = min(max(score, 0), 100)
+    label = "High" if score >= 80 else "Medium" if score >= 60 else "Low"
+    scenario_padding = 0.08 + (100 - score) / 250.0
+    half_width = max(spread / 2.0, average * scenario_padding)
+    method_low = min(finite_values)
+    method_high = max(finite_values)
+    return {
+        "score": score,
+        "label": label,
+        "low": _positive(max(0.0, min(method_low, average - half_width))),
+        "high": _positive(max(method_high, average + half_width)),
     }

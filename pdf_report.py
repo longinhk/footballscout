@@ -9,6 +9,8 @@ from typing import Any
 
 from fpdf import FPDF
 
+from valuation import valuation_confidence
+
 
 _TRANSLITERATION = str.maketrans(
     {
@@ -44,11 +46,18 @@ def _included_items(
 
 
 class _ComparisonPDF(FPDF):
+    source_label = "Football data"
+
     def footer(self) -> None:
         self.set_y(-12)
         self.set_font("Arial", "", 8)
         self.set_text_color(100, 110, 106)
-        self.cell(0, 7, f"Footy-Scout | Page {self.page_no()}", align="C")
+        self.cell(
+            0,
+            7,
+            f"Footy-Scout | {self.source_label} | Page {self.page_no()}",
+            align="C",
+        )
 
 
 def _finite_value(value: Any) -> float:
@@ -110,7 +119,14 @@ def generate_valuation_pdf(
         raise ValueError("Players and valuations must have matching lengths.")
 
     blended_values = [_blended(values) for values in valuations]
+    uses_real_data = any(
+        player.get("data_source") == "api_football" for player in players
+    )
+    source_label = (
+        "API-Football season data" if uses_real_data else "Fictional sample data"
+    )
     pdf = _ComparisonPDF()
+    pdf.source_label = source_label
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.set_title("Footy-Scout comparison")
     pdf.set_author("Footy-Scout")
@@ -125,7 +141,7 @@ def generate_valuation_pdf(
     pdf.cell(
         0,
         7,
-        "Educational estimates - not official market valuations",
+        f"{source_label} - educational estimates only",
         ln=True,
         align="C",
     )
@@ -163,6 +179,13 @@ def generate_valuation_pdf(
             f"{player.get('games') or 0} appearances | {player.get('minutes') or 0} minutes"
         )
         pdf.multi_cell(0, 6, _pdf_text(details))
+        context = (
+            f"{player.get('nationality') or 'Unknown nationality'} | "
+            f"{player.get('preferred_foot') or 'Unknown'} foot | "
+            f"Contract {player.get('contract_years') or '-'} years | "
+            f"{player.get('injury_risk') or 'Unknown'} injury risk"
+        )
+        pdf.multi_cell(0, 6, _pdf_text(context))
         pdf.multi_cell(0, 6, _pdf_text(_performance_line(player)))
         pdf.set_text_color(65, 78, 73)
         pdf.multi_cell(0, 6, _pdf_text(f"{competitions} | Season {season}"))
@@ -174,6 +197,17 @@ def generate_valuation_pdf(
             )
         pdf.set_font("Arial", "B", 10)
         pdf.cell(0, 7, f"Blended (equal weight): EUR {blended:.2f}M", ln=True)
+        confidence = valuation_confidence(dict(player), dict(values))
+        pdf.set_font("Arial", "", 9)
+        pdf.multi_cell(
+            0,
+            6,
+            _pdf_text(
+                f"{confidence['label']} reliability ({confidence['score']}/100) | "
+                f"Illustrative scenario EUR {confidence['low']:.2f}M-"
+                f"{confidence['high']:.2f}M"
+            ),
+        )
         pdf.ln(5)
 
     output = pdf.output(dest="S")
