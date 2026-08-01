@@ -1,30 +1,66 @@
 # Footy-Scout
 
-Footy-Scout is a Streamlit workspace for comparing two football players across
-season output, per-90 performance and transparent valuation demos.
+Footy-Scout is a Streamlit workspace for finding real football players and
+comparing their season statistics. Visitors search by full name or surname, choose two
+profiles and load a season into the same responsive scouting canvas.
 
-The app opens with fictional demo players, so the complete comparison and
-export flow works without an account or API key. Live comparisons use
-[API-Football](https://www.api-football.com/).
+The app also includes a clearly labelled catalog of 48 fictional players. That
+sample mode works without an API key and lets people explore the interface when
+the live data service is unavailable or its daily allowance has been reached.
 
 ## What it includes
 
-- No-key demo mode with four fictional player profiles
-- Live API-Football comparisons with cached season responses
-- Combined statistics across every competition row returned for a player
-- Position-aware, per-90 heuristic and constrained demonstration model
-- Explicit equal-weight blended estimate and method spread
-- Side-by-side summary, shared performance table and tie handling
-- PDF and CSV exports with player-specific filenames
-- Actionable API errors and graceful PDF character fallback for unsupported glyphs
+- Global real-player profile search powered by API-Football
+- Full-name fallback search with accent handling and ranked, deduplicated results
+- Provider-supported season choices, profile filters and honest coverage notes
+- Season statistics aggregated across the player's teams and competitions
+- Side-by-side summaries, real-data comparison profiles and position-aware per-90 views
+- Three transparent educational valuation methods with reliability ranges
+- Shareable real-player comparison URLs
+- Portable real-player favourites for later comparisons and fantasy squads
+- A Fantasy Challenge with 1–8 players, a €100M budget, captains and a session leaderboard
+- PDF and CSV comparison exports
+- A fictional sample catalog with filters, watchlists and portable workspaces
+- Responsive and keyboard-friendly controls for desktop and mobile
 
-> The valuations are educational estimates. They do not include contract data,
-> injury history, club finances, league-strength adjustments or verified market
-> comparables, and they are not official market values or financial advice.
+API coverage varies by player, competition and season. Valuations are
+illustrative estimates, not official market values, recruitment recommendations
+or financial advice.
+
+## API setup
+
+Create an API-Football account and copy your key from the dashboard. The free
+plan currently provides a limited daily request allowance, so this app caches
+profile searches for 12 hours, season statistics for 6 hours and available
+seasons for 24 hours. A small disk cache preserves responses across local app
+restarts and never stores the API key.
+
+API-Football currently limits free-plan player statistics to seasons 2022–2024.
+Footy-Scout detects the account plan and only offers those seasons to free-plan
+users, avoiding a request that the provider would reject with HTTP 403.
+
+For local use:
+
+```bash
+cp .streamlit/secrets.example.toml .streamlit/secrets.toml
+chmod 600 .streamlit/secrets.toml
+```
+
+Then replace the placeholder in `.streamlit/secrets.toml`:
+
+```toml
+API_FOOTBALL_KEY = "your-private-key"
+```
+
+For Streamlit Community Cloud, open the app's **Settings → Secrets** and add the
+same TOML value. Never commit `.streamlit/secrets.toml`; it is already ignored by
+Git. Visitors do not enter the key, and it is never rendered in the interface.
+
+Legacy RapidAPI accounts may set `RAPIDAPI_KEY` instead.
 
 ## Run locally
 
-Python 3.10 or newer is recommended.
+Python 3.10 or newer is required.
 
 ```bash
 python -m venv .venv
@@ -33,23 +69,38 @@ python -m pip install -r requirements.txt
 python -m streamlit run app.py
 ```
 
-Open <http://localhost:8501>. Demo mode is ready immediately.
+Open <http://localhost:8501>. Without a configured key, real-player mode shows a
+setup message and the fictional sample catalog remains available.
 
-### Enable live data
+## Product workflows
 
-Create `.streamlit/secrets.toml` (already ignored by Git):
+### Compare players
 
-```toml
-RAPIDAPI_KEY = "your-rapidapi-key"
-```
+Choose **Compare players → Real players**, enter two names, refine results with
+position, nationality or age filters, and load a season. The browser address is
+updated with the two API player IDs and season, so the comparison can be shared.
+A visitor must confirm before a shared link spends requests from the site's API
+allowance. Missing provider fields remain visibly unavailable instead of
+becoming false zeroes.
 
-You can alternatively set `RAPIDAPI_KEY` in the environment or enter a
-temporary override in the sidebar. A configured server-side key is never sent
-back to the password field. Player IDs must be API-Football IDs.
+Favourite buttons store normalized real-player season rows in the current
+session. Download the favourites JSON to restore the library in a later session.
 
-For players returned with several team or competition entries, Footy-Scout sums
-counting statistics, uses an appearance-weighted rating, and labels the result
-as an all-competitions view.
+### Fantasy Challenge
+
+Choose **Fantasy challenge** and select either the fictional sample catalog or
+saved real-player favourites. Squads can contain 1–8 players, use a €100M budget
+and require one captain whose points are doubled. Named teams can be saved to a
+session leaderboard and exported as CSV. Real-player squads are grouped by one
+saved season so their scores stay comparable. Scoring uses aggregate season data
+and is an educational product demonstration rather than an official live game.
+
+## Troubleshooting
+
+- **HTTP 403 / invalid key:** copy the direct key from API-Football **Account → My Access** into `.streamlit/secrets.toml`, then restart Streamlit.
+- **A player is hard to find:** use at least four characters from the surname; API-Football controls profile availability and search pagination.
+- **No statistics:** on the free plan, try 2022–2024; provider coverage still varies by player and competition.
+- **Daily limit reached:** wait for the provider allowance to reset or use the sample catalog. Cached searches continue to work while valid.
 
 ## Test
 
@@ -60,9 +111,13 @@ python -m compileall -q .
 
 ## Project structure
 
-- `app.py` — Streamlit interface and comparison presentation
-- `data_fetcher.py` — API client and response normalization
-- `valuation.py` — bounded heuristic and demonstration model
-- `pdf_report.py` — in-memory PDF export
-- `demo_data.py` — fictional, deterministic demo profiles
-- `tests/test_core.py` — parser, model, API and export tests
+- `app.py` — real-player search, comparison, exports and sample workspace
+- `app_helpers.py` — profile filters, share links and portable real favourites
+- `data_fetcher.py` — secure API-Football requests and response normalization
+- `demo_data.py` — deterministic catalog of 48 fictional sample players
+- `fantasy.py` — bounded player pricing, scoring and 1–8-player squad validation
+- `scouting.py` — sample percentiles, form summaries and workspace helpers
+- `valuation.py` — bounded heuristic, demonstration and context methods
+- `pdf_report.py` — in-memory PDF report generation
+- `ui_components.py` — reusable presentation and responsive styling
+- `tests/` — data, valuation, export and interface regression tests
