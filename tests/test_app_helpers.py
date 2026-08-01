@@ -7,6 +7,7 @@ from app_helpers import (
     parse_comparison_query,
     parse_real_favorites,
     real_favorites_bytes,
+    real_result_session_updates,
     remove_real_favorite,
     save_league_entry,
     save_real_favorite,
@@ -92,6 +93,19 @@ class SharingTests(unittest.TestCase):
             comparison_query([154, 154], "2025")
         self.assertIsNone(parse_comparison_query({"a": "bad", "b": "2", "season": "x"}))
         self.assertIsNone(parse_comparison_query({"a": "1"}))
+
+    def test_manual_comparison_does_not_rewrite_instantiated_selectors(self):
+        updates = real_result_session_updates([], "2024", 101, 202)
+
+        self.assertNotIn("real_selected_a", updates)
+        self.assertNotIn("real_selected_b", updates)
+        self.assertEqual(updates["real_season"], "2024")
+
+    def test_shared_comparison_can_sync_selectors_before_they_render(self):
+        updates = real_result_session_updates([], "2024", 101, 202, sync_selectors=True)
+
+        self.assertEqual(updates["real_selected_a"], 101)
+        self.assertEqual(updates["real_selected_b"], 202)
 
 
 class LibraryTests(unittest.TestCase):

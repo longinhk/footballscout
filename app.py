@@ -19,6 +19,7 @@ from app_helpers import (
     parse_comparison_query,
     parse_real_favorites,
     real_favorites_bytes,
+    real_result_session_updates,
     save_league_entry,
     toggle_real_favorite_snapshot,
 )
@@ -581,16 +582,20 @@ def _store_real_result(
     season: str,
     first_api_id: int,
     second_api_id: int,
+    *,
+    sync_selectors: bool = False,
 ) -> None:
     """Store one successful matchup and clear any stale shared-link warning."""
     _remember_real_players(players)
-    st.session_state["real_results_a"] = [first_api_id]
-    st.session_state["real_results_b"] = [second_api_id]
-    st.session_state["real_selected_a"] = first_api_id
-    st.session_state["real_selected_b"] = second_api_id
-    st.session_state["real_season"] = str(season)
-    st.session_state["real_result"] = {"players": players, "season": str(season)}
-    st.session_state["shared_comparison_error"] = ""
+    updates = real_result_session_updates(
+        players,
+        season,
+        first_api_id,
+        second_api_id,
+        sync_selectors=sync_selectors,
+    )
+    for key, value in updates.items():
+        st.session_state[key] = value
 
 
 def _load_shared_comparison(
@@ -631,7 +636,13 @@ def _load_shared_comparison(
     except FootballAPIError as exc:
         st.session_state["shared_comparison_error"] = str(exc)
     else:
-        _store_real_result(players, season, first_api_id, second_api_id)
+        _store_real_result(
+            players,
+            season,
+            first_api_id,
+            second_api_id,
+            sync_selectors=True,
+        )
     finally:
         st.session_state["loaded_share"] = shared
 
