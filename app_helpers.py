@@ -130,13 +130,13 @@ def real_result_session_updates(
 ) -> dict[str, Any]:
     """Build safe session updates for manual comparisons or shared links."""
     updates: dict[str, Any] = {
-        "real_season": str(season),
         "real_result": {"players": players, "season": str(season)},
         "shared_comparison_error": "",
     }
     if sync_selectors:
         updates.update(
             {
+                "real_season": str(season),
                 "real_results_a": [first_api_id],
                 "real_results_b": [second_api_id],
                 "real_selected_a": first_api_id,

@@ -99,13 +99,15 @@ class SharingTests(unittest.TestCase):
 
         self.assertNotIn("real_selected_a", updates)
         self.assertNotIn("real_selected_b", updates)
-        self.assertEqual(updates["real_season"], "2024")
+        self.assertNotIn("real_season", updates)
+        self.assertEqual(updates["real_result"]["season"], "2024")
 
     def test_shared_comparison_can_sync_selectors_before_they_render(self):
         updates = real_result_session_updates([], "2024", 101, 202, sync_selectors=True)
 
         self.assertEqual(updates["real_selected_a"], 101)
         self.assertEqual(updates["real_selected_b"], 202)
+        self.assertEqual(updates["real_season"], "2024")
 
 
 class LibraryTests(unittest.TestCase):
