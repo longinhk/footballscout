@@ -1,10 +1,14 @@
 import unittest
 import tempfile
+from pathlib import Path
 from unittest.mock import patch
 from unittest.mock import Mock
 
 import requests
 from streamlit.testing.v1 import AppTest
+
+
+APP_PATH = str(Path(__file__).resolve().parents[1] / "app.py")
 
 
 def rendered_html(app: AppTest) -> str:
@@ -102,7 +106,7 @@ class AppSmokeTests(unittest.TestCase):
         self.disable_api.stop()
 
     def load_app(self) -> AppTest:
-        app = AppTest.from_file("app.py", default_timeout=45)
+        app = AppTest.from_file(APP_PATH, default_timeout=45)
         app.secrets = {}
         return app.run()
 
@@ -290,7 +294,7 @@ class AppSmokeTests(unittest.TestCase):
         self.assertIn("Session leaderboard", rendered_html(app))
 
     def test_real_fantasy_pool_keeps_saved_seasons_separate(self):
-        app = AppTest.from_file("app.py", default_timeout=45)
+        app = AppTest.from_file(APP_PATH, default_timeout=45)
         app.secrets = {}
         app.session_state["workspace_mode"] = "Fantasy challenge"
         app.session_state["fantasy_pool_mode"] = "Real favourites"
@@ -343,7 +347,7 @@ class AppSmokeTests(unittest.TestCase):
                     return_value=("api-sports", "free-plan-test-key"),
                 ):
                     with patch("data_fetcher.requests.get", side_effect=request):
-                        app = AppTest.from_file("app.py", default_timeout=45).run()
+                        app = AppTest.from_file(APP_PATH, default_timeout=45).run()
 
         self.assertEqual(list(app.exception), [])
         season = by_label(app.selectbox, "season")
@@ -384,7 +388,7 @@ class AppSmokeTests(unittest.TestCase):
                     return_value=("api-sports", "test-key"),
                 ):
                     with patch("data_fetcher.requests.get", side_effect=request):
-                        app = AppTest.from_file("app.py", default_timeout=45)
+                        app = AppTest.from_file(APP_PATH, default_timeout=45)
                         app.query_params = {"a": "101", "b": "202", "season": "2025"}
                         app.run()
 
