@@ -120,6 +120,32 @@ def parse_comparison_query(params: Mapping[str, Any]) -> tuple[int, int, str] | 
     return int(payload["a"]), int(payload["b"]), payload["season"]
 
 
+def real_result_session_updates(
+    players: list[dict[str, Any]],
+    season: Any,
+    first_api_id: int,
+    second_api_id: int,
+    *,
+    sync_selectors: bool = False,
+) -> dict[str, Any]:
+    """Build safe session updates for manual comparisons or shared links."""
+    updates: dict[str, Any] = {
+        "real_result": {"players": players, "season": str(season)},
+        "shared_comparison_error": "",
+    }
+    if sync_selectors:
+        updates.update(
+            {
+                "real_season": str(season),
+                "real_results_a": [first_api_id],
+                "real_results_b": [second_api_id],
+                "real_selected_a": first_api_id,
+                "real_selected_b": second_api_id,
+            }
+        )
+    return updates
+
+
 def save_real_favorite(
     favorites: Mapping[str, Mapping[str, Any]], player: Mapping[str, Any]
 ) -> dict[str, dict[str, Any]]:
