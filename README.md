@@ -60,7 +60,7 @@ Legacy RapidAPI accounts may set `RAPIDAPI_KEY` instead.
 
 ## Run locally
 
-Python 3.10 or newer is required.
+Python 3.12 is the supported and CI-tested runtime.
 
 ```bash
 python -m venv .venv
@@ -106,6 +106,7 @@ and is an educational product demonstration rather than an official live game.
 
 ```bash
 python -m unittest discover -s tests -v
+python -m ruff check .
 python -m compileall -q .
 ```
 
