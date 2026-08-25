@@ -354,6 +354,51 @@ class AppSmokeTests(unittest.TestCase):
         self.assertEqual(season.options, ["2024", "2023", "2022"])
         self.assertEqual(season.value, "2024")
 
+    def test_low_quota_pauses_search_and_offers_sample_catalog(self):
+        def request(url, **_kwargs):
+            if url.endswith("/status"):
+                return api_response(
+                    {
+                        "errors": [],
+                        "response": {
+                            "subscription": {"plan": "Free", "active": True},
+                            "requests": {"current": 96, "limit_day": 100},
+                        },
+                    }
+                )
+            if url.endswith("/players/seasons"):
+                return api_response({"response": [2024, 2023, 2022]})
+            raise AssertionError(f"Unexpected API URL: {url}")
+
+        with tempfile.TemporaryDirectory() as cache_directory:
+            with patch.dict(
+                "os.environ",
+                {
+                    "FOOTBALLSCOUT_DISABLE_API": "0",
+                    "FOOTBALLSCOUT_CACHE_PATH": f"{cache_directory}/cache.json",
+                },
+            ):
+                with patch(
+                    "data_fetcher.get_api_credentials",
+                    return_value=("api-sports", "low-quota-test-key"),
+                ):
+                    with patch("data_fetcher.requests.get", side_effect=request):
+                        app = AppTest.from_file(APP_PATH, default_timeout=45).run()
+
+        self.assertEqual(list(app.exception), [])
+        search_buttons = [
+            button for button in app.button if button.label.startswith("Search Player")
+        ]
+        self.assertEqual(len(search_buttons), 2)
+        self.assertTrue(all(button.disabled for button in search_buttons))
+        self.assertTrue(
+            any(button.label == "Open Sample catalog" for button in app.button)
+        )
+        self.assertTrue(
+            any("last checked api allowance: 4 of 100" in item.value.casefold()
+                for item in app.caption)
+        )
+
     def test_shared_real_comparison_loads_with_dynamic_seasons_and_favourites(self):
         requested_urls = []
 

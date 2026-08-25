@@ -1,3 +1,4 @@
+from copy import deepcopy
 import json
 import tempfile
 import unittest
@@ -8,7 +9,9 @@ import requests
 
 from data_fetcher import (
     DIRECT_API_ROOT,
+    HTTP_TIMEOUT,
     FootballAPIError,
+    age_for_season,
     clear_disk_cache,
     fetch_account_status,
     fetch_available_seasons,
@@ -130,7 +133,7 @@ class ProfileSearchTests(CacheIsolatedTestCase):
             f"{DIRECT_API_ROOT}/players/profiles",
             headers={"x-apisports-key": "secret"},
             params={"search": "Messi"},
-            timeout=15,
+            timeout=HTTP_TIMEOUT,
         )
 
     @patch("data_fetcher.requests.get")
@@ -270,6 +273,26 @@ class PersistentCacheTests(CacheIsolatedTestCase):
 
         self.assertEqual(request.call_count, 2)
 
+    @patch("data_fetcher.time.sleep")
+    @patch("data_fetcher.requests.get")
+    def test_transient_outage_serves_expired_cache(self, request, sleep):
+        request.return_value = provider_response(PROFILE_RESPONSE)
+        search_player_profiles("Messi", api_key="secret", cache_path=self.cache_path)
+        cache = json.loads(self.cache_path.read_text(encoding="utf-8"))
+        for entry in cache["entries"].values():
+            entry["expires_at"] = 0
+        self.cache_path.write_text(json.dumps(cache), encoding="utf-8")
+        request.side_effect = requests.Timeout("provider unavailable")
+
+        profiles, metadata = search_player_profiles_with_metadata(
+            "Messi", api_key="secret", cache_path=self.cache_path
+        )
+
+        self.assertEqual(profiles[0]["api_id"], 154)
+        self.assertTrue(metadata["used_stale_fallback"])
+        self.assertEqual(request.call_count, 4)
+        self.assertEqual(sleep.call_count, 2)
+
     @patch("data_fetcher.requests.get")
     def test_corrupt_cache_is_discarded_and_rebuilt(self, request):
         self.cache_path.write_text("{not-json", encoding="utf-8")
@@ -382,6 +405,19 @@ class AvailableSeasonsTests(CacheIsolatedTestCase):
 
 
 class ProviderErrorTests(CacheIsolatedTestCase):
+    @patch("data_fetcher.time.sleep")
+    @patch("data_fetcher.requests.get")
+    def test_transient_response_is_retried_before_success(self, request, sleep):
+        request.side_effect = [
+            provider_response({}, status=503, headers={"Retry-After": "1"}),
+            provider_response(PROFILE_RESPONSE),
+        ]
+
+        profiles = search_player_profiles("Messi", api_key="secret", use_cache=False)
+
+        self.assertEqual(profiles[0]["api_id"], 154)
+        self.assertEqual(request.call_count, 2)
+        sleep.assert_called_once_with(1.0)
     @patch("data_fetcher.requests.get")
     def test_rate_limit_has_a_clear_message(self, request):
         request.return_value = provider_response(
@@ -442,6 +478,24 @@ class ProviderErrorTests(CacheIsolatedTestCase):
 
 
 class PlayerSeasonTests(CacheIsolatedTestCase):
+    def test_age_is_derived_for_the_historical_season(self):
+        payload = deepcopy(PLAYER_RESPONSE)
+        payload["response"][0]["player"].update(
+            {
+                "birth": {"date": "1987-06-24"},
+                "age": 39,
+                "injured": True,
+            }
+        )
+
+        player = parse_player_response(payload, season="2022")
+
+        self.assertEqual(age_for_season("1987-06-24", "2022"), 35)
+        self.assertEqual(player["age"], 35)
+        self.assertEqual(player["age_source"], "birth_date")
+        self.assertEqual(player["age_reference"], "2022-12-31")
+        self.assertEqual(player["injury_risk"], "Unknown")
+
     def test_player_parser_aggregates_a_season_without_inventing_fields(self):
         player = parse_player_response(PLAYER_RESPONSE, season="2025")
 
