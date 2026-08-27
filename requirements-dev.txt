@@ -1,5 +1,7 @@
 -c constraints.txt
 -r requirements.txt
 
+coverage==7.15.4
+mypy==1.20.2
 pip==26.2.1
 ruff==0.12.0

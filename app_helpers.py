@@ -233,6 +233,8 @@ def save_league_entry(
     if not name:
         raise ValueError("Give the fantasy team a name.")
     points = entry.get("points")
+    if points is None:
+        raise ValueError("Fantasy points must be numeric.")
     try:
         safe_points = float(points)
     except (TypeError, ValueError, OverflowError) as exc:

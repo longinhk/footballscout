@@ -1,5 +1,9 @@
 # Footy-Scout
 
+[![Tests](https://github.com/longinhk/footballscout/actions/workflows/test.yml/badge.svg)](https://github.com/longinhk/footballscout/actions/workflows/test.yml)
+![Python 3.12](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
+[![MIT License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+
 Footy-Scout is a Streamlit workspace for finding real football players and
 comparing their season statistics. Visitors search by full name or surname, choose two
 profiles and load a season into the same responsive scouting canvas.
@@ -137,10 +141,26 @@ squad members visible rather than silently deleting them.
 ## Test
 
 ```bash
-python -m unittest discover -s tests -v
 python -m ruff check .
+python -m mypy app_helpers.py app_state.py fantasy.py scouting.py valuation.py
+python -m coverage run -m unittest discover -s tests -v
+python -m coverage report
 python -m compileall -q .
 ```
+
+CI enforces branch-aware coverage of at least 84% across production modules.
+Static type checking begins with the state and domain modules so the gate stays
+actionable while the Streamlit orchestration is progressively decomposed.
+
+## Architecture and project policies
+
+- [`docs/architecture.md`](docs/architecture.md) explains the runtime boundaries,
+  data flow, cache policy and next decomposition steps.
+- [`SECURITY.md`](SECURITY.md) documents credential handling and private
+  vulnerability reporting.
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) contains the reproducible development and
+  validation workflow.
+- The project is released under the [`MIT License`](LICENSE).
 
 ## Project structure
 
