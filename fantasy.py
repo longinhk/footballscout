@@ -282,7 +282,7 @@ def _provided_value(
         player.get("name"),
     )
     for candidate in candidates:
-        if isinstance(candidate, (str, int)) and candidate in blended_values:
+        if isinstance(candidate, str) and candidate in blended_values:
             return blended_values[candidate]
         text_candidate = str(candidate) if candidate is not None else None
         if text_candidate is not None and text_candidate in blended_values:

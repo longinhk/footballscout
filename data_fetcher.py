@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import os
 import tempfile
@@ -13,6 +14,7 @@ import unicodedata
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
 from copy import deepcopy
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -24,11 +26,16 @@ CACHE_VERSION = 1
 PROFILE_CACHE_TTL = 12 * 60 * 60
 PLAYER_CACHE_TTL = 6 * 60 * 60
 SEASONS_CACHE_TTL = 24 * 60 * 60
+HTTP_TIMEOUT = (3.05, 12)
+MAX_REQUEST_ATTEMPTS = 3
+MAX_RETRY_DELAY_SECONDS = 2.0
+TRANSIENT_HTTP_STATUSES = frozenset({429, 502, 503, 504})
 
 DEFAULT_CACHE_PATH = (
     Path(__file__).resolve().parent / ".footy_scout_cache" / "api-responses.json"
 )
 _CACHE_LOCK = threading.RLock()
+LOGGER = logging.getLogger(__name__)
 
 
 class FootballAPIError(RuntimeError):
@@ -123,7 +130,11 @@ def _cache_key(provider: str, path: str, params: Mapping[str, Any]) -> str:
 
 
 def _cache_get(
-    cache_path: Path, key: str, *, now: float | None = None
+    cache_path: Path,
+    key: str,
+    *,
+    now: float | None = None,
+    allow_stale: bool = False,
 ) -> dict[str, Any] | None:
     current_time = time.time() if now is None else now
     with _CACHE_LOCK:
@@ -133,7 +144,10 @@ def _cache_get(
         return None
     expires_at = _finite_number(entry.get("expires_at"))
     data = entry.get("data")
-    if expires_at is None or expires_at <= current_time or not isinstance(data, dict):
+    if expires_at is None or not isinstance(data, dict):
+        return None
+    is_stale = expires_at <= current_time
+    if is_stale and not allow_stale:
         return None
     cached = deepcopy(data)
     metadata = cached.setdefault("_meta", {})
@@ -142,6 +156,7 @@ def _cache_get(
         cached["_meta"] = metadata
     metadata["cache"] = {
         "hit": True,
+        "stale": is_stale,
         "stored_at": entry.get("stored_at"),
         "expires_at": expires_at,
     }
@@ -279,6 +294,58 @@ def _height_cm(value: Any) -> int | None:
     return int(number) if number is not None and 120 <= number <= 230 else None
 
 
+def _birth_date(value: Any) -> str | None:
+    """Return a validated ISO birth date without retaining other profile details."""
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = date.fromisoformat(value.strip())
+    except ValueError:
+        return None
+    return parsed.isoformat() if 1900 <= parsed.year <= date.today().year else None
+
+
+def age_for_season(birth_date: Any, season: str | int | None) -> int | None:
+    """Return age at 31 December of the provider's season start year."""
+    normalized_birth = _birth_date(birth_date)
+    season_number = _finite_number(season)
+    if (
+        normalized_birth is None
+        or season_number is None
+        or not season_number.is_integer()
+        or not 1900 <= season_number <= 2200
+    ):
+        return None
+    born = date.fromisoformat(normalized_birth)
+    reference = date(int(season_number), 12, 31)
+    if born > reference:
+        return None
+    return reference.year - born.year - (
+        (reference.month, reference.day) < (born.month, born.day)
+    )
+
+
+def _season_age(
+    birth_date: Any,
+    current_age: Any,
+    season: str | int | None,
+) -> tuple[int | None, str]:
+    exact_age = age_for_season(birth_date, season)
+    if exact_age is not None:
+        return exact_age, "birth_date"
+    age_number = _finite_number(current_age)
+    season_number = _finite_number(season)
+    if (
+        age_number is None
+        or season_number is None
+        or not season_number.is_integer()
+        or not 1900 <= season_number <= date.today().year
+    ):
+        return None, "unavailable"
+    estimated = max(0, int(age_number) - (date.today().year - int(season_number)))
+    return estimated, "current_age_adjusted"
+
+
 def _flatten_error_detail(value: Any) -> list[str]:
     if isinstance(value, Mapping):
         details: list[str] = []
@@ -347,10 +414,13 @@ def extract_api_metadata(data: Mapping[str, Any]) -> dict[str, Any]:
     if isinstance(raw_meta, Mapping):
         quota = raw_meta.get("quota")
         cache = raw_meta.get("cache")
+        fallback = raw_meta.get("fallback")
         if isinstance(quota, Mapping):
             metadata["quota"] = dict(quota)
         if isinstance(cache, Mapping):
             metadata["cache"] = dict(cache)
+        if isinstance(fallback, Mapping):
+            metadata["fallback"] = dict(fallback)
 
     results = _finite_number(data.get("results"))
     if results is not None:
@@ -375,6 +445,78 @@ def extract_api_metadata(data: Mapping[str, Any]) -> dict[str, Any]:
             if str(key).casefold() not in {"key", "api_key", "token"}
         }
     return metadata
+
+
+def _retry_delay(response: requests.Response | None, attempt: int) -> float:
+    """Return a short bounded delay, respecting numeric Retry-After values."""
+    if response is not None:
+        headers = getattr(response, "headers", {})
+        retry_after = headers.get("Retry-After") if isinstance(headers, Mapping) else None
+        seconds = _finite_number(retry_after)
+        if seconds is not None:
+            return min(max(seconds, 0.0), MAX_RETRY_DELAY_SECONDS)
+    return min(0.25 * (2**attempt), MAX_RETRY_DELAY_SECONDS)
+
+
+def _request_with_retries(
+    url: str,
+    *,
+    headers: Mapping[str, str],
+    params: Mapping[str, Any],
+) -> requests.Response:
+    """Request one idempotent endpoint with bounded transient retries."""
+    last_error: requests.RequestException | None = None
+    for attempt in range(MAX_REQUEST_ATTEMPTS):
+        try:
+            response = requests.get(
+                url,
+                headers=dict(headers),
+                params=dict(params),
+                timeout=HTTP_TIMEOUT,
+            )
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            last_error = exc
+            if attempt == MAX_REQUEST_ATTEMPTS - 1:
+                raise
+            time.sleep(_retry_delay(None, attempt))
+            continue
+
+        status_number = _finite_number(getattr(response, "status_code", None))
+        status = int(status_number) if status_number is not None else 0
+        retry_after_available = (
+            status == 429
+            and isinstance(getattr(response, "headers", None), Mapping)
+            and "Retry-After" in response.headers
+        )
+        retryable_status = status in {502, 503, 504} or retry_after_available
+        if retryable_status and attempt < MAX_REQUEST_ATTEMPTS - 1:
+            time.sleep(_retry_delay(response, attempt))
+            continue
+        return response
+
+    if last_error is not None:  # pragma: no cover - defensive loop exhaust guard
+        raise last_error
+    raise requests.RequestException("The football request did not complete.")
+
+
+def _stale_fallback(
+    cache_path: Path,
+    cache_key: str,
+    *,
+    reason: str,
+) -> dict[str, Any] | None:
+    cached = _cache_get(cache_path, cache_key, allow_stale=True)
+    if cached is None:
+        return None
+    metadata = cached.setdefault("_meta", {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+        cached["_meta"] = metadata
+    metadata["fallback"] = {
+        "stale": True,
+        "reason": reason,
+    }
+    return cached
 
 
 def _provider_request(
@@ -417,15 +559,49 @@ def _provider_request(
     if use_cache and cache_ttl is not None and cache_ttl > 0:
         cached = _cache_get(resolved_path, cache_key)
         if cached is not None:
+            LOGGER.info(
+                "football_api_request provider=%s path=%s cache_hit=true",
+                provider_name,
+                path,
+            )
             return cached
 
+    started_at = time.monotonic()
     try:
-        response = requests.get(url, headers=headers, params=request_params, timeout=15)
+        response = _request_with_retries(
+            url,
+            headers=headers,
+            params=request_params,
+        )
         response.raise_for_status()
     except requests.Timeout as exc:
+        if use_cache and (stale := _stale_fallback(
+            resolved_path, cache_key, reason="timeout"
+        )) is not None:
+            LOGGER.warning(
+                "football_api_request provider=%s path=%s fallback=stale reason=timeout",
+                provider_name,
+                path,
+            )
+            return stale
         raise FootballAPIError("The football search timed out. Please retry.") from exc
     except requests.HTTPError as exc:
         status = exc.response.status_code if exc.response is not None else "unknown"
+        if (
+            use_cache
+            and status in TRANSIENT_HTTP_STATUSES
+            and (stale := _stale_fallback(
+                resolved_path, cache_key, reason=f"http_{status}"
+            ))
+            is not None
+        ):
+            LOGGER.warning(
+                "football_api_request provider=%s path=%s fallback=stale status=%s",
+                provider_name,
+                path,
+                status,
+            )
+            return stale
         detail = _http_error_detail(exc.response, key)
         if status == 401:
             message = "The server's football data key was rejected (HTTP 401)."
@@ -462,7 +638,24 @@ def _provider_request(
             message = f"{message.rstrip('.')} Provider detail: {detail}."
         raise FootballAPIError(message) from exc
     except requests.RequestException as exc:
+        if use_cache and (stale := _stale_fallback(
+            resolved_path, cache_key, reason="network"
+        )) is not None:
+            LOGGER.warning(
+                "football_api_request provider=%s path=%s fallback=stale reason=network",
+                provider_name,
+                path,
+            )
+            return stale
         raise FootballAPIError("Could not reach the football data service.") from exc
+
+    LOGGER.info(
+        "football_api_request provider=%s path=%s status=%s latency_ms=%s cache_hit=false",
+        provider_name,
+        path,
+        getattr(response, "status_code", "unknown"),
+        round((time.monotonic() - started_at) * 1000),
+    )
 
     try:
         data = response.json()
@@ -521,6 +714,8 @@ def parse_profile_response(data: Mapping[str, Any]) -> list[dict[str, Any]]:
         if api_id <= 0 or api_id in seen_ids:
             continue
         seen_ids.add(api_id)
+        birth = raw_player.get("birth")
+        birth = birth if isinstance(birth, Mapping) else {}
         profiles.append(
             {
                 "api_id": api_id,
@@ -529,6 +724,7 @@ def parse_profile_response(data: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "firstname": _text(raw_player.get("firstname"), ""),
                 "lastname": _text(raw_player.get("lastname"), ""),
                 "age": _count(raw_player.get("age")) or None,
+                "birth_date": _birth_date(birth.get("date")),
                 "nationality": _text(raw_player.get("nationality")),
                 "height_cm": _height_cm(raw_player.get("height")),
                 "position": _text(raw_player.get("position")),
@@ -727,6 +923,11 @@ def _search_player_profiles_with_metadata(
     ]
     if cache_states:
         metadata["all_cache_hits"] = all(cache_states)
+    metadata["used_stale_fallback"] = any(
+        bool(item.get("fallback", {}).get("stale"))
+        for item in response_metadata
+        if isinstance(item.get("fallback"), Mapping)
+    )
     return profiles, metadata
 
 
@@ -868,7 +1069,10 @@ def parse_player_response(
         raise FootballAPIError("No usable season statistics were returned.")
 
     api_id = _count(player_info.get("id"))
-    age = _finite_number(player_info.get("age"))
+    birth = player_info.get("birth")
+    birth = birth if isinstance(birth, Mapping) else {}
+    birth_date = _birth_date(birth.get("date"))
+    age, age_source = _season_age(birth_date, player_info.get("age"), season)
     position = (
         max(position_weights, key=position_weights.get)
         if position_weights
@@ -896,7 +1100,12 @@ def parse_player_response(
             and player_info.get("photo").strip()
             else None
         ),
-        "age": max(0, int(age)) if age is not None else None,
+        "age": age,
+        "birth_date": birth_date,
+        "age_source": age_source,
+        "age_reference": (
+            f"{season_label}-12-31" if season_label != "Unknown" else None
+        ),
         "nationality": _text(player_info.get("nationality")),
         "preferred_foot": None,
         "height_cm": _height_cm(player_info.get("height")),
@@ -915,7 +1124,9 @@ def parse_player_response(
         "competition_count": max(1, len(competition_ids)),
         "contract_years": None,
         "contract_expires": None,
-        "injury_risk": "High" if player_info.get("injured") is True else "Unknown",
+        # The provider's injury flag describes the current profile, not the
+        # requested historical season, so it must not influence past valuations.
+        "injury_risk": "Unknown",
         "games_missed_365": None,
         "league_strength": None,
         "club_selling_power": None,

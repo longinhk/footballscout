@@ -23,6 +23,12 @@ from app_helpers import (
     save_league_entry,
     toggle_real_favorite_snapshot,
 )
+from app_state import (
+    claim_real_search,
+    initialize_session_state,
+    preserve_selected_pool,
+    seed_fantasy_from_comparison,
+)
 from data_fetcher import (
     FootballAPIError,
     fetch_account_status,
@@ -45,6 +51,7 @@ from fantasy import (
     DEFAULT_BUDGET_MILLIONS,
     DEFAULT_SQUAD_SIZE,
     MAX_SQUAD_SIZE,
+    calculate_player_price,
     calculate_squad,
 )
 from pdf_report import generate_valuation_pdf
@@ -413,12 +420,25 @@ def _swap_real_result() -> None:
         st.session_state["real_selected_b"] = first_id
 
 
-def _open_fantasy_workspace() -> None:
-    st.session_state["workspace_mode"] = "Fantasy challenge"
+def _open_fantasy_workspace(
+    players: list[dict[str, Any]] | None = None,
+) -> None:
+    if players:
+        seed_fantasy_from_comparison(
+            st.session_state,
+            players,
+            maximum_squad_size=MAX_SQUAD_SIZE,
+        )
+    else:
+        st.session_state["workspace_mode"] = "Fantasy challenge"
 
 
 def _open_compare_workspace() -> None:
     st.session_state["workspace_mode"] = "Compare players"
+
+
+def _open_sample_catalog() -> None:
+    st.session_state["source_mode"] = "Sample catalog"
 
 
 def _reset_fantasy_filters() -> None:
@@ -466,12 +486,16 @@ def _real_library_html(favorites: dict[str, dict[str, Any]]) -> str:
 def _real_profile_label(api_id: int) -> str:
     profile = st.session_state.get("real_profile_cache", {}).get(str(api_id), {})
     parts = [str(profile.get("name") or f"Player {api_id}")]
+    team = str(profile.get("team") or "")
+    if team and team not in {"Unknown", "All teams and competitions"}:
+        parts.append(team)
     for field in ("position", "nationality"):
         value = str(profile.get(field) or "")
         if value and value != "Unknown":
             parts.append(value)
     if profile.get("age"):
         parts.append(f"Age {profile['age']}")
+    parts.append(f"ID {api_id}")
     return " · ".join(parts)
 
 
@@ -483,6 +507,7 @@ def _render_real_player_search(
     positions: list[str],
     nationality: str,
     age_range: tuple[int, int] | None,
+    search_enabled: bool = True,
 ) -> int | None:
     title = f"Player {side}"
     term_key = f"real_query_{side.lower()}"
@@ -498,31 +523,45 @@ def _render_real_player_search(
         )
         submitted = st.form_submit_button(
             f"Search {title}",
+            disabled=not search_enabled,
             width="stretch",
         )
     if submitted:
-        try:
-            with st.spinner(f"Searching for {query.strip() or 'player'}…"):
-                results, metadata = cached_profile_search(
-                    query,
-                    provider,
-                    credential_cache_scope(api_key),
-                    api_key,
-                )
-        except FootballAPIError as exc:
-            st.session_state[error_key] = str(exc)
-            st.session_state[results_key] = []
+        guard_error = claim_real_search(st.session_state, side)
+        if guard_error:
+            st.session_state[error_key] = guard_error
         else:
-            st.session_state[error_key] = ""
-            st.session_state[results_key] = [result["api_id"] for result in results]
-            profile_cache = dict(st.session_state.get("real_profile_cache", {}))
-            profile_cache.update({str(result["api_id"]): result for result in results})
-            st.session_state["real_profile_cache"] = profile_cache
-            st.session_state["real_api_metadata"] = metadata
-            if not results:
-                st.session_state[error_key] = (
-                    "No matching profiles were found. Try the player's surname."
+            try:
+                with st.spinner(f"Searching for {query.strip() or 'player'}…"):
+                    results, metadata = cached_profile_search(
+                        query,
+                        provider,
+                        credential_cache_scope(api_key),
+                        api_key,
+                    )
+            except FootballAPIError as exc:
+                st.session_state[error_key] = str(exc)
+                st.session_state[results_key] = []
+            else:
+                st.session_state[error_key] = ""
+                st.session_state[results_key] = [
+                    result["api_id"] for result in results
+                ]
+                profile_cache = dict(st.session_state.get("real_profile_cache", {}))
+                profile_cache.update(
+                    {str(result["api_id"]): result for result in results}
                 )
+                st.session_state["real_profile_cache"] = profile_cache
+                st.session_state["real_api_metadata"] = metadata
+                if metadata.get("used_stale_fallback"):
+                    st.session_state[error_key] = (
+                        "Live football data is temporarily unavailable. "
+                        "Showing the most recent cached search results."
+                    )
+                elif not results:
+                    st.session_state[error_key] = (
+                        "No matching profiles were found. Try the player's surname."
+                    )
 
     error = st.session_state.get(error_key)
     if error:
@@ -550,13 +589,15 @@ def _render_real_player_search(
         return None
     if st.session_state.get(selected_key) not in result_ids:
         st.session_state[selected_key] = result_ids[0]
-    return st.selectbox(
+    selected = st.selectbox(
         f"{title} result",
         result_ids,
         format_func=_real_profile_label,
         key=selected_key,
         width="stretch",
     )
+    st.caption(f"Selected {title}: {_real_profile_label(selected)}")
+    return selected
 
 
 def _remember_real_players(players: list[dict[str, Any]]) -> None:
@@ -569,10 +610,14 @@ def _remember_real_players(players: list[dict[str, Any]]) -> None:
                 "player_id": player.get("player_id"),
                 "name": player.get("name"),
                 "age": player.get("age"),
+                "birth_date": player.get("birth_date"),
+                "age_source": player.get("age_source"),
                 "nationality": player.get("nationality"),
                 "height_cm": player.get("height_cm"),
                 "position": player.get("position"),
                 "photo": player.get("photo"),
+                "team": player.get("team"),
+                "teams": player.get("teams"),
             }
     st.session_state["real_profile_cache"] = profile_cache
 
@@ -673,37 +718,51 @@ def render_real_setup(
         account_status = {}
         st.warning(f"The API plan status could not be checked. {exc}")
 
+    request_limit = account_status.get("requests_limit")
+    request_current = account_status.get("requests_current")
+    account_remaining = (
+        max(0, int(request_limit) - int(request_current))
+        if request_limit is not None and request_current is not None
+        else None
+    )
+    low_quota = account_remaining is not None and account_remaining <= 5
+
     fallback_seasons = [
         str(year) for year in range(date.today().year, date.today().year - 5, -1)
     ]
     is_free_plan = str(account_status.get("plan") or "").casefold() == "free"
-    try:
-        available_seasons, season_metadata = cached_available_seasons(
-            provider, credential_cache_scope(api_key), api_key
-        )
-    except FootballAPIError as exc:
-        st.warning(f"Available seasons could not be refreshed. {exc}")
+    if low_quota:
         season_options = (
             list(FREE_PLAN_PLAYER_SEASONS) if is_free_plan else fallback_seasons
         )
     else:
-        if is_free_plan:
-            season_options = [
-                str(season)
-                for season in available_seasons
-                if str(season) in FREE_PLAN_PLAYER_SEASONS
-            ]
-            if not season_options:
-                season_options = list(FREE_PLAN_PLAYER_SEASONS)
+        try:
+            available_seasons, season_metadata = cached_available_seasons(
+                provider, credential_cache_scope(api_key), api_key
+            )
+        except FootballAPIError as exc:
+            st.warning(f"Available seasons could not be refreshed. {exc}")
+            season_options = (
+                list(FREE_PLAN_PLAYER_SEASONS) if is_free_plan else fallback_seasons
+            )
         else:
-            season_options = [
-                str(season)
-                for season in available_seasons
-                if season <= date.today().year
-            ][:10]
-        st.session_state["real_api_metadata"] = season_metadata
-        if not season_options:
-            season_options = fallback_seasons
+            if is_free_plan:
+                season_options = [
+                    str(season)
+                    for season in available_seasons
+                    if str(season) in FREE_PLAN_PLAYER_SEASONS
+                ]
+                if not season_options:
+                    season_options = list(FREE_PLAN_PLAYER_SEASONS)
+            else:
+                season_options = [
+                    str(season)
+                    for season in available_seasons
+                    if season <= date.today().year
+                ][:10]
+            st.session_state["real_api_metadata"] = season_metadata
+            if not season_options:
+                season_options = fallback_seasons
 
     shared_request = parse_comparison_query(st.query_params)
     if (
@@ -718,6 +777,7 @@ def render_real_setup(
         if st.button(
             "Load shared comparison",
             type="primary",
+            disabled=low_quota,
             key="load_shared_comparison",
             width="stretch",
         ):
@@ -741,10 +801,26 @@ def render_real_setup(
     if is_free_plan:
         st.caption("Free-plan player statistics currently cover seasons 2022–2024.")
     quota = st.session_state.get("real_api_metadata", {}).get("quota", {})
-    if quota.get("remaining") is not None:
+    if account_remaining is not None:
         st.caption(
-            f"API allowance: {quota['remaining']} of {quota.get('limit', '—')} "
-            "requests remaining today"
+            f"Last checked API allowance: {account_remaining} of {request_limit} "
+            "requests available today"
+        )
+    elif quota.get("remaining") is not None:
+        st.caption(
+            f"Last observed API allowance: {quota['remaining']} of "
+            f"{quota.get('limit', '—')} requests available"
+        )
+    if low_quota:
+        st.warning(
+            "Real-player searches are paused to preserve the owner's final five "
+            "API requests. The complete Sample catalog remains available."
+        )
+        st.button(
+            "Open Sample catalog",
+            on_click=_open_sample_catalog,
+            key="low_quota_sample_fallback",
+            width="stretch",
         )
     with st.expander("Real-player filters"):
         selected_positions = st.multiselect(
@@ -782,6 +858,7 @@ def render_real_setup(
         positions=selected_positions,
         nationality=nationality,
         age_range=selected_age,
+        search_enabled=not low_quota,
     )
     second_api_id = _render_real_player_search(
         "B",
@@ -790,6 +867,7 @@ def render_real_setup(
         positions=selected_positions,
         nationality=nationality,
         age_range=selected_age,
+        search_enabled=not low_quota,
     )
     st.html(player_key_html())
 
@@ -797,10 +875,16 @@ def render_real_setup(
     if can_compare and first_api_id == second_api_id:
         st.error("Choose two different real players.")
         can_compare = False
+    if can_compare:
+        st.info(
+            "Matchup ready: "
+            f"{_real_profile_label(first_api_id)} vs "
+            f"{_real_profile_label(second_api_id)}"
+        )
     compare = st.button(
         "Compare selected players",
         type="primary",
-        disabled=not can_compare,
+        disabled=not can_compare or low_quota,
         key="compare_real_players",
         width="stretch",
     )
@@ -838,6 +922,18 @@ def render_real_setup(
 
     st.html(sidebar_step_html(3, "Read the comparison", "Change names anytime"))
     saved_result = st.session_state.get("real_result")
+    if saved_result and any(
+        bool(
+            player.get("api_metadata", {})
+            .get("fallback", {})
+            .get("stale")
+        )
+        for player in saved_result.get("players", [])
+    ):
+        st.warning(
+            "The provider is temporarily unavailable, so this comparison uses "
+            "the most recent cached season data."
+        )
     favorites = st.session_state.get("real_favorites", {})
     with st.expander(
         f"Real-player favourites ({len(favorites)})", expanded=bool(favorites)
@@ -1078,12 +1174,23 @@ def render_offline_setup() -> tuple[list[dict[str, Any]], str]:
     return players, f"Sample catalog · {len(roster)} players · v{DATASET_VERSION}"
 
 
-def _fantasy_player_label(player_id: str, pool: dict[str, dict[str, Any]]) -> str:
+def _fantasy_player_label(
+    player_id: str,
+    pool: dict[str, dict[str, Any]],
+    prices: dict[str, float] | None = None,
+) -> str:
     player = pool[player_id]
     team = included_items(player, "teams", "team")
+    price = (
+        prices.get(player_id)
+        if prices is not None
+        else None
+    )
+    if price is None:
+        price = float(calculate_player_price(player)["price"])
     return (
         f"{player.get('name') or 'Unknown player'} · "
-        f"{team} · {player.get('position') or 'Unknown'}"
+        f"{team} · {player.get('position') or 'Unknown'} · €{price:.1f}M"
     )
 
 
@@ -1196,9 +1303,25 @@ def render_fantasy_sidebar() -> dict[str, Any]:
         competition=fantasy_competition,
         age_range=fantasy_age,
     )
-    pool = {str(player["player_id"]): player for player in filtered_pool}
+    current_selected_ids = [
+        str(player_id)
+        for player_id in st.session_state.get("fantasy_selected_ids", [])
+    ]
+    pool, retained_selected_ids, hidden_selected_count = preserve_selected_pool(
+        unfiltered_pool,
+        filtered_pool,
+        current_selected_ids,
+    )
+    if retained_selected_ids != current_selected_ids:
+        st.session_state["fantasy_selected_ids"] = retained_selected_ids
     if unfiltered_pool:
-        st.caption(f"{len(pool)} of {len(unfiltered_pool)} fantasy players match")
+        filtered_count = len(filtered_pool)
+        st.caption(f"{filtered_count} of {len(unfiltered_pool)} fantasy players match")
+    if hidden_selected_count:
+        st.caption(
+            f"Keeping {hidden_selected_count} selected player"
+            f"{'s' if hidden_selected_count != 1 else ''} visible despite the filters."
+        )
 
     if not unfiltered_pool:
         st.warning("Save real players from a comparison before building this squad.")
@@ -1226,10 +1349,16 @@ def render_fantasy_sidebar() -> dict[str, Any]:
     ][:squad_size]
     if selected_state != st.session_state.get("fantasy_selected_ids", []):
         st.session_state["fantasy_selected_ids"] = selected_state
+    player_prices = {
+        player_id: float(calculate_player_price(player)["price"])
+        for player_id, player in pool.items()
+    }
     selected_ids = st.multiselect(
         f"Select exactly {squad_size} player{'s' if squad_size != 1 else ''}",
         pool_ids,
-        format_func=lambda player_id: _fantasy_player_label(player_id, pool),
+        format_func=lambda player_id: _fantasy_player_label(
+            player_id, pool, player_prices
+        ),
         max_selections=squad_size,
         key="fantasy_selected_ids",
         placeholder="Add players to the squad",
@@ -1241,7 +1370,9 @@ def render_fantasy_sidebar() -> dict[str, Any]:
         captain_id = st.selectbox(
             "Captain · scores double points",
             selected_ids,
-            format_func=lambda player_id: _fantasy_player_label(player_id, pool),
+            format_func=lambda player_id: _fantasy_player_label(
+                player_id, pool, player_prices
+            ),
             key="fantasy_captain",
         )
 
@@ -1414,22 +1545,12 @@ default_pair = (valid_ids[0], valid_ids[1])
 ages = [int(player["age"]) for player in roster]
 age_bounds = (min(ages), max(ages))
 
-st.session_state.setdefault("watchlist_ids", [])
-st.session_state.setdefault("saved_matchups", [])
-st.session_state.setdefault("last_valid_ids", default_pair)
-st.session_state.setdefault("offline_player_a", default_pair[0])
-st.session_state.setdefault("offline_player_b", default_pair[1])
-st.session_state.setdefault("offline_search", "")
-st.session_state.setdefault("filter_positions", [])
-st.session_state.setdefault("filter_leagues", [])
-st.session_state.setdefault("filter_age", age_bounds)
-st.session_state.setdefault("filter_minutes", 0)
-st.session_state.setdefault("real_profile_cache", {})
-st.session_state.setdefault("real_favorites", {})
-st.session_state.setdefault("fantasy_league", [])
-st.session_state.setdefault("workspace_mode", "Compare players")
-st.session_state.setdefault("fantasy_pool_mode", "Sample catalog")
-st.session_state.setdefault("fantasy_squad_size", DEFAULT_SQUAD_SIZE)
+initialize_session_state(
+    st.session_state,
+    default_pair=default_pair,
+    age_bounds=age_bounds,
+    default_squad_size=DEFAULT_SQUAD_SIZE,
+)
 
 credentials = get_api_credentials()
 players: list[dict[str, Any]] | None
@@ -1560,8 +1681,9 @@ if is_real:
                 st.toast("The browser address now opens this comparison.")
         with fantasy_column:
             st.button(
-                "Open Fantasy Challenge",
+                "Add matchup to Fantasy",
                 on_click=_open_fantasy_workspace,
+                args=(players,),
                 key="open_fantasy",
                 width="stretch",
             )
